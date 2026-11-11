@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Monza Auto</string>
+    <string name="notif_channel">Связь с магнитолой</string>
+    <string name="stop">Остановить</string>
+</resources>

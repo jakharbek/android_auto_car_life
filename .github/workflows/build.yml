@@ -1,0 +1,96 @@
+name: Build APK
+
+on:
+  push:
+    branches: ['**']
+    paths-ignore: ['**.md']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Head unit certificate
+        env:
+          HU_CERT_PEM: ${{ secrets.HU_CERT_PEM }}
+          HU_KEY_PEM: ${{ secrets.HU_KEY_PEM }}
+        run: |
+          if [ -n "$HU_CERT_PEM" ] && [ -n "$HU_KEY_PEM" ]; then
+            mkdir -p app/src/main/assets/hu
+            printf '%s\n%s\n' "$HU_CERT_PEM" "$HU_KEY_PEM" > app/src/main/assets/hu/hu.pem
+            echo "Certificate added to the APK"
+          else
+            echo "::warning::HU_CERT_PEM / HU_KEY_PEM secrets are not set: load the certificate in the app"
+          fi
+
+      - name: Signing key
+        env:
+          KEYSTORE_B64: ${{ secrets.MONZA_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.MONZA_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.MONZA_KEY_ALIAS }}
+        run: |
+          set -euo pipefail
+          D="$RUNNER_TEMP/signing"
+          mkdir -p "$D"
+          if [ -n "${KEYSTORE_B64:-}" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > "$D/release.jks"
+            ALIAS="${KEY_ALIAS:-monzaauto}"
+            PW="$KEYSTORE_PASSWORD"
+          else
+            ALIAS=monzaauto
+            PW="$(openssl rand -hex 16)"
+            keytool -genkeypair -keystore "$D/release.jks" -alias "$ALIAS" -keyalg RSA -keysize 2048 -validity 10000 \
+              -storepass "$PW" -keypass "$PW" -dname "CN=Monza Auto" >/dev/null
+            echo "::warning::MONZA_KEYSTORE_BASE64 is not set: signed with a one-time key, updates will need a reinstall"
+          fi
+          echo "::add-mask::$PW"
+          printf 'storeFile=release.jks\nstorePassword=%s\nkeyAlias=%s\nkeyPassword=%s\n' "$PW" "$ALIAS" "$PW" > "$D/release.properties"
+          echo "MONZA_SIGNING_PROPERTIES=$D/release.properties" >> "$GITHUB_ENV"
+
+      - name: Tests
+        run: ./gradlew --no-daemon testDebugUnitTest
+
+      - name: Build
+        run: ./gradlew --no-daemon assembleRelease
+
+      - name: Collect APK
+        id: apk
+        run: |
+          VER=$(sed -n 's/^ *versionName = "\(.*\)"/\1/p' app/build.gradle.kts)
+          OUT="monza-auto-$VER.apk"
+          cp app/build/outputs/apk/release/app-release.apk "$OUT"
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          echo "file=$OUT" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.apk.outputs.file }}
+          path: ${{ steps.apk.outputs.file }}
+
+      - name: Release
+        if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch) || github.event_name == 'workflow_dispatch'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.apk.outputs.version }}
+          name: Monza Auto ${{ steps.apk.outputs.version }}
+          target_commitish: ${{ github.sha }}
+          files: ${{ steps.apk.outputs.file }}
+          make_latest: 'true'
+          body: Monza Auto ${{ steps.apk.outputs.version }}

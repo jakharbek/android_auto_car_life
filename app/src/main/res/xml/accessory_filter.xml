@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Head units with CarLife announce themselves as USB accessory model "CarLife". -->
+<resources>
+    <usb-accessory model="CarLife" />
+</resources>

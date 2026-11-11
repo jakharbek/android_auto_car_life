@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Steering wheel on a dark blue background. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <path android:fillColor="#FFFFFFFF"
+        android:pathData="M54,30a24,24 0,1 0,0.01 0zM54,36a18,18 0,0 1,17.4 13.5L60,49.5a6,6 0,0 0,-12 0L36.6,49.5A18,18 0,0 1,54 36zM37,55.5h10.2a6,6 0,0 0,3.8 4.6v11.3A18,18 0,0 1,37 55.5zM57,71.4V60.1a6,6 0,0 0,3.8 -4.6H71A18,18 0,0 1,57 71.4z" />
+</vector>

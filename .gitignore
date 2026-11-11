@@ -1,0 +1,12 @@
+.gradle/
+.kotlin/
+build/
+local.properties
+.idea/
+*.iml
+*.apk
+*.aab
+*.jks
+*.keystore
+# head unit certificate and key are never committed: CI writes them from secrets
+app/src/main/assets/hu/
