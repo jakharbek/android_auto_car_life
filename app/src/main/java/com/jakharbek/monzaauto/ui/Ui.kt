@@ -8,6 +8,7 @@ import android.graphics.drawable.GradientDrawable
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
+import android.view.ViewGroup
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
 import android.widget.Button
@@ -128,6 +129,22 @@ class Ui(private val ctx: Context) {
             card.addView(button(c.fix.label) { onFix(c) })
         }
         return card
+    }
+
+    /**
+     * Keeps content out from under the status bar, navigation bar and display cutout
+     * (apps targeting Android 15+ are always drawn edge to edge).
+     */
+    fun insetSafe(root: View): View {
+        if (android.os.Build.VERSION.SDK_INT >= 30) {
+            root.setOnApplyWindowInsetsListener { v, insets ->
+                val b = insets.getInsets(android.view.WindowInsets.Type.systemBars() or android.view.WindowInsets.Type.displayCutout())
+                v.setPadding(b.left, b.top, b.right, b.bottom)
+                insets
+            }
+            (root as? ViewGroup)?.clipToPadding = false
+        }
+        return root
     }
 
     fun gap(h: Int = 10) = View(ctx).apply { layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, dp(h)) }

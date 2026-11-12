@@ -57,6 +57,8 @@ class CarLifeLinkTest {
 
         fun next(): Packet = got.poll(3, TimeUnit.SECONDS) ?: error("phone sent nothing")
 
+        // some head units send the version twice in a row: answered once
+        hu(Chan.CMD, Msg.HU_PROTOCOL_VERSION, PbOut().int(1, 2).int(2, 0).toBytes())
         hu(Chan.CMD, Msg.HU_PROTOCOL_VERSION, PbOut().int(1, 2).int(2, 0).toBytes())
         assertEquals(Msg.PROTOCOL_VERSION_MATCH_STATUS, next().type)
         assertEquals(Msg.FOREGROUND, next().type)
@@ -101,6 +103,17 @@ class CarLifeLinkTest {
 
         hu(Chan.TOUCH, Msg.TOUCH_HARD_KEY, PbOut().int(1, HardKey.SEEK_ADD).toBytes())
         assertEquals("key 87", rec.events.poll(3, TimeUnit.SECONDS))
+
+        // gesture-mode long press: down at press time, up when the finger lifts
+        hu(Chan.TOUCH, Msg.TOUCH_LONG_PRESS, PbOut().int(1, 100).int(2, 200).toBytes())
+        assertEquals("touch 0 [Finger(id=0, x=100, y=200)]", rec.events.poll(3, TimeUnit.SECONDS))
+        hu(Chan.TOUCH, Msg.TOUCH_UP, PbOut().int(1, 100).int(2, 200).toBytes())
+        assertEquals("touch 1 [Finger(id=0, x=100, y=200)]", rec.events.poll(3, TimeUnit.SECONDS))
+
+        // the head unit restarts its session on the same cable: the phone starts over
+        hu(Chan.CMD, Msg.HU_PROTOCOL_VERSION, PbOut().int(1, 2).int(2, 0).toBytes())
+        assertEquals(Msg.PROTOCOL_VERSION_MATCH_STATUS, next().type)
+        assertTrue(!link.streaming)
 
         link.close("test")
     }

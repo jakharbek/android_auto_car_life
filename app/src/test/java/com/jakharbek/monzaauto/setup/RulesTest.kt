@@ -48,6 +48,10 @@ class RulesTest {
         assertEquals(Level.OK, Rules.server(ServerProbe.IN_USE_BY_APP, snap()).level)
         // running, but the last session timed out: the one-shot server has to be restarted
         assertEquals(Level.WARN, Rules.server(ServerProbe.RUNNING, snap(aa = AaStage.CLOSED, timedOut = true)).level)
+        // any finished session used the server up
+        assertEquals(Level.WARN, Rules.server(ServerProbe.RUNNING, snap(aa = AaStage.CLOSED)).level)
+        // a refused connection means it was not running then; now it is, and fresh
+        assertEquals(Level.OK, Rules.server(ServerProbe.RUNNING, snap(aa = AaStage.CLOSED, refused = true)).level)
     }
 
     @Test

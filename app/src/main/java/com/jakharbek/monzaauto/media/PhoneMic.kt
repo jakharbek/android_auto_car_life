@@ -50,6 +50,7 @@ class PhoneMic(private val sink: (ByteArray, Long) -> Unit) {
             } catch (e: Exception) {
                 Log.e("MIC: recording failed", e)
             } finally {
+                synchronized(this) { if (gen == generation) active = false }
                 try { rec.stop() } catch (_: Exception) {}
                 rec.release()
                 Log.i("MIC: stopped")

@@ -45,7 +45,7 @@ enum class ServerProbe { RUNNING, NOT_RUNNING, IN_USE_BY_APP, UNKNOWN }
 object Rules {
     const val AA_SERVER_STEPS =
         "Android Auto → Настройки → 10 раз нажмите «Версия» (включится режим разработчика) → меню ⋮ вверху → " +
-            "«Запустить сервер головного устройства»."
+            "«Вкл. сервер головного устр-ва» (в английской версии «Start head unit server»)."
 
     private val dateFmt = SimpleDateFormat("dd.MM.yyyy", Locale.US)
 
@@ -127,11 +127,16 @@ object Rules {
         val title = "Сервер головного устройства"
         return when (probe) {
             ServerProbe.IN_USE_BY_APP -> Check("server", title, Level.OK, "Приложение сейчас подключено к Android Auto.")
-            ServerProbe.RUNNING -> if (snapshot.aaTimedOut && snapshot.aaStage == AaStage.CLOSED) {
+            // The server serves one connection in its life: after any finished session it still listens but never answers.
+            ServerProbe.RUNNING -> if (snapshot.aaStage == AaStage.CLOSED && !snapshot.aaRefused) {
                 Check(
                     "server", title, Level.WARN,
-                    "Сервер запущен, но в прошлый раз не ответил: он одноразовый и после обрыва перестаёт отвечать.",
-                    "В Android Auto: меню ⋮ → «Остановить сервер головного устройства», затем снова «Запустить», и нажмите «Подключить Android Auto».",
+                    if (snapshot.aaTimedOut) {
+                        "Сервер запущен, но в прошлый раз не ответил: он одноразовый и после обрыва перестаёт отвечать."
+                    } else {
+                        "Сервер запущен, но уже использован прошлым сеансом: он одноразовый и второй раз не ответит."
+                    },
+                    "В Android Auto: меню ⋮ → «Остановить сервер головного устройства» (Stop head unit server), затем снова «Вкл. сервер головного устр-ва», и нажмите «Подключить Android Auto».",
                     Fix.OPEN_AA_SETTINGS,
                 )
             } else {
@@ -244,7 +249,7 @@ object Rules {
                 )
                 s.aaTimedOut -> Check(
                     "aalink", title, Level.FAIL, "Android Auto не ответил: сервер головного устройства «завис» после прошлого сеанса.",
-                    "В Android Auto: ⋮ → «Остановить сервер головного устройства», затем «Запустить», и нажмите «Подключить Android Auto».",
+                    "В Android Auto: ⋮ → «Остановить сервер головного устройства» (Stop head unit server), затем «Вкл. сервер головного устр-ва», и нажмите «Подключить Android Auto».",
                     Fix.OPEN_AA_SETTINGS,
                 )
                 else -> Check(

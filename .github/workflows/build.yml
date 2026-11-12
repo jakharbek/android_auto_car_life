@@ -41,6 +41,7 @@ jobs:
           fi
 
       - name: Signing key
+        id: signing
         env:
           KEYSTORE_B64: ${{ secrets.MONZA_KEYSTORE_BASE64 }}
           KEYSTORE_PASSWORD: ${{ secrets.MONZA_KEYSTORE_PASSWORD }}
@@ -53,12 +54,14 @@ jobs:
             echo "$KEYSTORE_B64" | base64 -d > "$D/release.jks"
             ALIAS="${KEY_ALIAS:-monzaauto}"
             PW="$KEYSTORE_PASSWORD"
+            echo "permanent=true" >> "$GITHUB_OUTPUT"
           else
             ALIAS=monzaauto
             PW="$(openssl rand -hex 16)"
             keytool -genkeypair -keystore "$D/release.jks" -alias "$ALIAS" -keyalg RSA -keysize 2048 -validity 10000 \
               -storepass "$PW" -keypass "$PW" -dname "CN=Monza Auto" >/dev/null
             echo "::warning::MONZA_KEYSTORE_BASE64 is not set: signed with a one-time key, updates will need a reinstall"
+            echo "permanent=false" >> "$GITHUB_OUTPUT"
           fi
           echo "::add-mask::$PW"
           printf 'storeFile=release.jks\nstorePassword=%s\nkeyAlias=%s\nkeyPassword=%s\n' "$PW" "$ALIAS" "$PW" > "$D/release.properties"
@@ -78,6 +81,13 @@ jobs:
           cp app/build/outputs/apk/release/app-release.apk "$OUT"
           echo "version=$VER" >> "$GITHUB_OUTPUT"
           echo "file=$OUT" >> "$GITHUB_OUTPUT"
+          # a release is made once per version: the published APK always matches its tag
+          if git ls-remote --exit-code --tags origin "refs/tags/v$VER" >/dev/null; then
+            echo "new=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Release v$VER already exists: raise versionName to publish a new one (APK is in the artifacts)"
+          else
+            echo "new=true" >> "$GITHUB_OUTPUT"
+          fi
 
       - uses: actions/upload-artifact@v4
         with:
@@ -85,7 +95,9 @@ jobs:
           path: ${{ steps.apk.outputs.file }}
 
       - name: Release
-        if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch) || github.event_name == 'workflow_dispatch'
+        if: >-
+          (github.ref == format('refs/heads/{0}', github.event.repository.default_branch) || github.event_name == 'workflow_dispatch')
+          && steps.apk.outputs.new == 'true' && steps.signing.outputs.permanent == 'true'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ steps.apk.outputs.version }}

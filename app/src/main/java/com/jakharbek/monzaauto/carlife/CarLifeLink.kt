@@ -91,6 +91,13 @@ class CarLifeLink(
 
     /** Until a frame starting with SPS goes out, nothing else may: the head unit decoder starts from SPS+PPS+IDR. */
     @Volatile private var needSps = true
+    @Volatile private var lastKeyAsk = 0L
+    @Volatile private var versionAt = 0L
+
+    private fun askKeyFrame() {
+        lastKeyAsk = System.currentTimeMillis()
+        events.onVideoWanted()
+    }
     private var audioDropLogged = false
     @Volatile private var lastVideoTx = 0L
     @Volatile private var mediaInited = false
@@ -139,7 +146,11 @@ class CarLifeLink(
     fun sendVideo(frame: ByteArray, key: Boolean) {
         if (closed.get() || !streaming) return
         if (needSps) {
-            if (!H264.startsWithSps(frame)) return
+            if (!H264.startsWithSps(frame)) {
+                // backstop: keep asking while frames without SPS arrive
+                if (System.currentTimeMillis() - lastKeyAsk > 1500) askKeyFrame()
+                return
+            }
             needSps = false
             Log.i("CL: video starts with SPS/PPS + key frame")
         }
@@ -151,7 +162,7 @@ class CarLifeLink(
         if (queuedVideo.get() > MAX_QUEUED_VIDEO) {
             dropUntilKey = true
             Log.w("CL: USB too slow, dropping video until next key frame")
-            events.onVideoWanted()
+            askKeyFrame()
             return
         }
         queuedVideo.incrementAndGet()
@@ -299,8 +310,15 @@ class CarLifeLink(
         Log.i("CL RX ${Msg.name(p.type)} $body")
         when (p.type) {
             Msg.HU_PROTOCOL_VERSION -> {
-                if (versionSeen) return
+                if (versionSeen) {
+                    // Some head units send it twice in a row: ignore that. Later, it means the head unit restarted
+                    // its CarLife session on the same USB connection: start over.
+                    if (!initDone && System.currentTimeMillis() - versionAt < 5000) return
+                    Log.i("CL: head unit started a new session")
+                    restartSession()
+                }
                 versionSeen = true
+                versionAt = System.currentTimeMillis()
                 huMajor = body.int(1, 1)
                 Diag.huProtocol = "${body.int(1)}.${body.int(2)}"
                 Diag.carStage = Diag.CarStage.TALKING
@@ -373,14 +391,32 @@ class CarLifeLink(
         }
     }
 
+    /** Forgets everything about the previous session on this USB connection. */
+    private fun restartSession() {
+        initDone = false
+        started = false
+        streaming = false
+        needSps = true
+        dropUntilKey = false
+        mediaInited = false
+        synchronized(this) {
+            ttsStopTask?.cancel(false)
+            ttsStopTask = null
+            ttsActive = false
+        }
+        touch.reset()
+        Diag.carStage = Diag.CarStage.TALKING
+    }
+
     private fun startVideo() {
         started = true
         initDone = true
-        // Gate first, then ask for a key frame, only then let frames through.
+        // Gate first and open the stream, then ask for the key frame: a key frame with SPS that comes out
+        // right away must not find the stream still closed (it would be dropped and nothing asked again).
         needSps = true
         dropUntilKey = false
-        events.onVideoWanted()
         streaming = true
+        askKeyFrame()
         Diag.carStage = Diag.CarStage.STREAMING
         events.onCarState("Магнитола показывает экран")
     }
@@ -392,7 +428,10 @@ class CarLifeLink(
             Msg.TOUCH_DOWN -> touch.gesture(1, b.int(1), b.int(2))
             Msg.TOUCH_MOVE -> touch.gesture(2, b.int(1), b.int(2))
             Msg.TOUCH_UP -> touch.gesture(3, b.int(1), b.int(2))
-            Msg.TOUCH_SINGLE_CLICK -> touch.gesture(4, b.int(1), b.int(2))
+            Msg.TOUCH_SINGLE_CLICK, Msg.TOUCH_DOUBLE_CLICK -> touch.gesture(4, b.int(1), b.int(2))
+            // long press comes at press time; the head unit sends TOUCH_UP when the finger lifts
+            Msg.TOUCH_LONG_PRESS -> touch.gesture(1, b.int(1), b.int(2))
+            Msg.TOUCH_BEGIN -> emptyList()
             Msg.TOUCH_HARD_KEY -> {
                 val key = b.int(1)
                 val android = hardKeyToAndroid(key)

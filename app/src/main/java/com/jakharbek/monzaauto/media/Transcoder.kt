@@ -99,6 +99,7 @@ class Transcoder(
             override fun onInputBufferAvailable(codec: MediaCodec, index: Int) = Unit
 
             override fun onOutputBufferAvailable(codec: MediaCodec, index: Int, info: MediaCodec.BufferInfo) {
+                if (codec !== encoder) return // a replaced encoder
                 try {
                     val buf = codec.getOutputBuffer(index)
                     if (buf != null && info.size > 0) {
@@ -119,7 +120,8 @@ class Transcoder(
             }
 
             override fun onError(codec: MediaCodec, e: MediaCodec.CodecException) {
-                Log.e("VIDEO: encoder error", e)
+                Log.e("VIDEO: encoder error (transient=${e.isTransient})", e)
+                if (!e.isTransient && codec === encoder) rebuild()
             }
 
             override fun onOutputFormatChanged(codec: MediaCodec, format: MediaFormat) {
@@ -137,8 +139,9 @@ class Transcoder(
             enc.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
         }
         inputSurface = enc.createInputSurface()
-        enc.start()
+        // set before start: callbacks ignore buffers of any codec that is not the current one
         encoder = enc
+        enc.start()
         Log.i("VIDEO: encoder ${enc.name} ${width}x$height ${bitrate / 1000} kbit/s")
     }
 
@@ -268,6 +271,43 @@ class Transcoder(
      * A failed decoder stops asking for input, which would leave Android Auto's frames unacknowledged and freeze
      * the picture: replace it, acknowledge everything waiting, and resume from Android Auto's next key frame.
      */
+    /**
+     * The encoder failed (for example the system took the hardware codec away): build the whole pipeline again,
+     * since the decoder draws into the encoder's surface. Codec thread.
+     */
+    private fun rebuild() {
+        if (released) return
+        Log.w("VIDEO: rebuilding encoder and decoder")
+        synchronized(lock) {
+            handler.removeCallbacks(renderHeld)
+            heldIndex = -1
+            heldCodec = null
+            for (p in pending) p.done()
+            pending.clear()
+            freeInputs.clear()
+            val dec = decoder
+            decoder = null
+            try { dec?.stop() } catch (_: Exception) {}
+            try { dec?.release() } catch (_: Exception) {}
+            val enc = encoder
+            encoder = null
+            try { enc?.stop() } catch (_: Exception) {}
+            try { enc?.release() } catch (_: Exception) {}
+            inputSurface?.release()
+            inputSurface = null
+            try {
+                start()
+                startDecoder()
+                sourceConfig?.let { pending.addLast(Pending(it, 0, true) {}) }
+                waitSourceKey = true
+            } catch (e: Exception) {
+                Log.e("VIDEO: rebuild failed", e)
+                return
+            }
+        }
+        afterRestart()
+    }
+
     private fun restartDecoder(failed: MediaCodec) {
         synchronized(lock) {
             if (released || failed !== decoder) return
@@ -288,6 +328,11 @@ class Transcoder(
                 Log.e("VIDEO: decoder restart failed", e)
             }
         }
+        afterRestart()
+    }
+
+    /** After the decoder was replaced: get a key frame from both sides; never stay frozen waiting for it. */
+    private fun afterRestart() {
         needSourceKeyFrame()
         wantKeyFrame()
         // Ask again if no key frame came; in the end decode whatever arrives rather than stay frozen.
@@ -350,7 +395,7 @@ class Transcoder(
         released = true
         handler.removeCallbacksAndMessages(null)
         synchronized(lock) {
-            for (p in pending) p.done()
+            // no acknowledgements here: the session is ending, and this may run on the main thread
             pending.clear()
             freeInputs.clear()
             try { decoder?.stop() } catch (_: Exception) {}

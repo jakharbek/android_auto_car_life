@@ -39,7 +39,7 @@ class MainActivity : BaseActivity() {
         super.onCreate(savedInstanceState)
         Log.dir = getExternalFilesDir("logs")
         settings = Settings(this)
-        setContentView(buildUi())
+        setContentView(ui.insetSafe(buildUi()))
         if (savedInstanceState == null && !WizardActivity.isDone(this)) {
             startActivity(Intent(this, WizardActivity::class.java))
         }

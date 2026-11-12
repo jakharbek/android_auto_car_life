@@ -84,7 +84,7 @@ class WizardActivity : BaseActivity() {
             listOf(
                 "1. Откройте настройки Android Auto (кнопка ниже).",
                 "2. Пролистайте вниз и 10 раз нажмите на «Версия» — появится сообщение о режиме разработчика (подтвердите).",
-                "3. Нажмите меню ⋮ вверху справа → «Запустить сервер головного устройства».",
+                "3. Нажмите меню ⋮ вверху справа → «Вкл. сервер головного устр-ва» (в английской версии «Start head unit server»).",
                 "4. Вернитесь сюда и нажмите «Проверить».",
                 "Сервер одноразовый: после каждого обрыва связи или перезагрузки телефона его нужно запускать заново.",
             ),
@@ -130,7 +130,7 @@ class WizardActivity : BaseActivity() {
         super.onCreate(savedInstanceState)
         index = (savedInstanceState?.getInt(KEY_STEP) ?: 0).coerceIn(0, steps.lastIndex)
         content = ui.column(18)
-        setContentView(ScrollView(this).apply { addView(content, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT)) })
+        setContentView(ui.insetSafe(ScrollView(this).apply { addView(content, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT)) }))
         show()
     }
 

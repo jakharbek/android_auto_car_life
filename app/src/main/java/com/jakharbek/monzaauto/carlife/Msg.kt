@@ -64,6 +64,9 @@ object Msg {
     const val TOUCH_UP = 0x00068003
     const val TOUCH_MOVE = 0x00068004
     const val TOUCH_SINGLE_CLICK = 0x00068005
+    const val TOUCH_DOUBLE_CLICK = 0x00068006
+    const val TOUCH_LONG_PRESS = 0x00068007
+    const val TOUCH_BEGIN = 0x0006800A
     const val TOUCH_HARD_KEY = 0x00068008
 
     private val names = mapOf(

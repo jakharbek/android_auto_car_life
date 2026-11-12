@@ -36,7 +36,7 @@ class DiagnosticsActivity : BaseActivity() {
         col.addView(buttons)
         box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         col.addView(box)
-        setContentView(ScrollView(this).apply { addView(col, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT)) })
+        setContentView(ui.insetSafe(ScrollView(this).apply { addView(col, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT)) }))
     }
 
     override fun onDestroy() {

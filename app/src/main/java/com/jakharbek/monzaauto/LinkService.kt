@@ -199,19 +199,28 @@ class LinkService : Service(), CarLifeEvents, AaEvents {
         val um = getSystemService(UsbManager::class.java)
         val acc = given ?: um.accessoryList?.firstOrNull()
         if (acc == null) {
-            Status.usb = "магнитола не найдена"
+            Status.usb = "магнитола не найдена: подключите кабель и включите CarLife на магнитоле"
             updateUi()
-            if (aa == null) stopAll()
+            if (aa == null) stopAll(keepStatus = true)
             return
         }
         Log.i("SVC: accessory ${acc.manufacturer} / ${acc.model} / ${acc.version}")
         Diag.accessory = "${acc.model} ${acc.version}"
         Diag.usbPermissionMissing = !um.hasPermission(acc)
         if (!um.hasPermission(acc)) {
-            Status.usb = "нет разрешения USB (переподключите кабель)"
+            // Ask now; when the user allows, the system starts this service again with the accessory.
+            Log.w("SVC: no permission for the accessory, asking")
+            val again = Intent(this, LinkService::class.java).setAction(ACTION_ATTACH).putExtra(EXTRA_ACCESSORY, acc)
+            val flags = PendingIntent.FLAG_UPDATE_CURRENT or (if (Build.VERSION.SDK_INT >= 31) PendingIntent.FLAG_MUTABLE else 0)
+            try {
+                um.requestPermission(acc, PendingIntent.getForegroundService(this, 2, again, flags))
+                Status.usb = "разрешите доступ к USB в окне на экране телефона"
+            } catch (e: Exception) {
+                Log.e("SVC: USB permission request failed", e)
+                Status.usb = "нет разрешения USB: отключите и снова подключите кабель"
+            }
             updateUi()
-            Log.w("SVC: no permission for the accessory")
-            if (aa == null) stopAll()
+            if (aa == null) stopAll(keepStatus = true)
             return
         }
         val fd = try {
@@ -221,9 +230,9 @@ class LinkService : Service(), CarLifeEvents, AaEvents {
             null
         }
         if (fd == null) {
-            Status.usb = "не удалось открыть USB"
+            Status.usb = "не удалось открыть USB: отключите и снова подключите кабель"
             updateUi()
-            if (aa == null) stopAll()
+            if (aa == null) stopAll(keepStatus = true)
             return
         }
         main.removeCallbacks(stopIfNoCar)
@@ -418,7 +427,8 @@ class LinkService : Service(), CarLifeEvents, AaEvents {
 
     // ---------- stop ----------
 
-    private fun stopAll() {
+    /** [keepStatus]: leave the last message on screen (it explains why nothing happened). */
+    private fun stopAll(keepStatus: Boolean = false) {
         if (stopped) return
         stopped = true
         Log.i("SVC: stopping")
@@ -436,9 +446,11 @@ class LinkService : Service(), CarLifeEvents, AaEvents {
         releaseVideo()
         isRunning = false
         Status.running = false
-        Status.usb = "не подключено"
-        Status.car = "—"
-        Status.aa = "—"
+        if (!keepStatus) {
+            Status.usb = "не подключено"
+            Status.car = "—"
+            Status.aa = "—"
+        }
         Status.changed()
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
