@@ -58,7 +58,27 @@ class Transcoder(
     private var sourceConfig: ByteArray? = null
 
     /** After a decoder restart, Android Auto frames are skipped until its next key frame. */
-    private var waitSourceKey = false
+    @Volatile private var waitSourceKey = false
+
+    /**
+     * Newest decoded frame held back by the frame rate limit (output index of [heldCodec]); rendered when the
+     * interval ends, so the last picture of a change always reaches the head unit. Codec thread only.
+     */
+    private var heldIndex = -1
+    private var heldCodec: MediaCodec? = null
+    private val renderHeld = Runnable {
+        val codec = heldCodec
+        val i = heldIndex
+        heldIndex = -1
+        heldCodec = null
+        if (codec != null && i >= 0 && codec === decoder) {
+            try {
+                codec.releaseOutputBuffer(i, true)
+                lastRenderNs = System.nanoTime()
+            } catch (_: Exception) {
+            }
+        }
+    }
 
     private var decoded = 0L
     private var encoded = 0L
@@ -202,11 +222,23 @@ class Transcoder(
 
             override fun onOutputBufferAvailable(codec: MediaCodec, index: Int, info: MediaCodec.BufferInfo) {
                 try {
-                    val now = System.nanoTime()
-                    val render = info.size > 0 && (minRenderIntervalNs == 0L || now - lastRenderNs >= minRenderIntervalNs)
-                    if (render) lastRenderNs = now
-                    codec.releaseOutputBuffer(index, render)
                     decoded++
+                    val interval = minRenderIntervalNs
+                    if (info.size <= 0) {
+                        codec.releaseOutputBuffer(index, false)
+                        return
+                    }
+                    // a newer frame replaces the held one
+                    dropHeld()
+                    val now = System.nanoTime()
+                    if (interval == 0L || now - lastRenderNs >= interval) {
+                        lastRenderNs = now
+                        codec.releaseOutputBuffer(index, true)
+                    } else {
+                        heldIndex = index
+                        heldCodec = codec
+                        handler.postDelayed(renderHeld, ((lastRenderNs + interval - now) / 1_000_000L).coerceAtLeast(1))
+                    }
                 } catch (e: Exception) {
                     if (!released) Log.e("VIDEO: decoder output", e)
                 }
@@ -239,6 +271,9 @@ class Transcoder(
     private fun restartDecoder(failed: MediaCodec) {
         synchronized(lock) {
             if (released || failed !== decoder) return
+            handler.removeCallbacks(renderHeld)
+            heldIndex = -1
+            heldCodec = null
             for (p in pending) p.done()
             pending.clear()
             freeInputs.clear()
@@ -255,6 +290,34 @@ class Transcoder(
         }
         needSourceKeyFrame()
         wantKeyFrame()
+        // Ask again if no key frame came; in the end decode whatever arrives rather than stay frozen.
+        handler.postDelayed({
+            if (waitSourceKey && !released) {
+                Log.w("VIDEO: still no key frame from Android Auto, asking again")
+                needSourceKeyFrame()
+            }
+        }, 2000)
+        handler.postDelayed({
+            if (waitSourceKey && !released) {
+                Log.w("VIDEO: no key frame from Android Auto, decoding anyway")
+                waitSourceKey = false
+            }
+        }, 5000)
+    }
+
+    /** Releases a held-back frame without showing it. Codec thread only. */
+    private fun dropHeld() {
+        handler.removeCallbacks(renderHeld)
+        val codec = heldCodec
+        val i = heldIndex
+        heldIndex = -1
+        heldCodec = null
+        if (codec != null && i >= 0) {
+            try {
+                codec.releaseOutputBuffer(i, false)
+            } catch (_: Exception) {
+            }
+        }
     }
 
     /** Moves pending frames into free decoder input buffers. Caller holds [lock]. */
@@ -285,6 +348,7 @@ class Transcoder(
 
     fun release() {
         released = true
+        handler.removeCallbacksAndMessages(null)
         synchronized(lock) {
             for (p in pending) p.done()
             pending.clear()

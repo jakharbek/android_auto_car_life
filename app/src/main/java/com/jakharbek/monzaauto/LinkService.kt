@@ -190,6 +190,12 @@ class LinkService : Service(), CarLifeEvents, AaEvents {
             Log.i("SVC: already connected to the car")
             return
         }
+        // A closed connection whose close callback has not run yet: release its descriptor now,
+        // otherwise the accessory cannot be opened again.
+        car?.let {
+            car = null
+            try { it.pfd.close() } catch (_: Exception) {}
+        }
         val um = getSystemService(UsbManager::class.java)
         val acc = given ?: um.accessoryList?.firstOrNull()
         if (acc == null) {
@@ -310,6 +316,7 @@ class LinkService : Service(), CarLifeEvents, AaEvents {
     private fun connectAa() {
         aaConnectScheduled = false
         if (stopped || aa != null || aaGaveUp) return
+        Diag.aaRetryPending = false
         if (carLink == null) return
         val creds = HuCredentials.load(this)
         if (creds == null) {
@@ -318,8 +325,8 @@ class LinkService : Service(), CarLifeEvents, AaEvents {
             Log.e("SVC: head unit certificate is missing")
             return
         }
-        // Declare the microphone only if it can really record in the background.
-        if (micAllowed() && !foregroundMic) goForeground()
+        // Declare the microphone only if the service entered the foreground with it while a screen was in front
+        // (adding the type from the background would succeed but record silence on Android 11-13).
         val config = HeadUnitConfig(dpi = settings.dpi, usbAudio = usbAudio(), mic = micAllowed() && foregroundMic)
         val link = AapLink(creds, config, this)
         aa = link
@@ -391,6 +398,7 @@ class LinkService : Service(), CarLifeEvents, AaEvents {
         Log.i("SVC: Android Auto closed: $reason")
         if (refused && carLink != null) {
             Status.aa = "Включите «сервер головного устройства» в Android Auto"
+            Diag.aaRetryPending = true
             main.postDelayed({ connectAa() }, AA_RETRY_MS)
         } else {
             aaGaveUp = true

@@ -63,6 +63,8 @@ object Probes {
      */
     fun serverProbe(): ServerProbe {
         if (Diag.aaStage in setOf(AaStage.CONNECTING, AaStage.HANDSHAKE, AaStage.CONNECTED, AaStage.VIDEO)) return ServerProbe.IN_USE_BY_APP
+        // The app keeps retrying on its own and the last try found nothing listening: do not hold the port meanwhile.
+        if (Diag.aaRetryPending) return ServerProbe.NOT_RUNNING
         return try {
             ServerSocket().use {
                 it.reuseAddress = false

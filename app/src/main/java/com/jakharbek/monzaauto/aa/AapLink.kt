@@ -517,8 +517,12 @@ class AapLink(
      */
     fun requestKeyFrame() {
         if (!connected) return
-        Log.i("AA: asking for a key frame")
-        send(Ch.VIDEO, T.VIDEO_FOCUS_NOTIFICATION, AaMessages.videoFocus(projected = true, unsolicited = true), controlType = false)
+        Log.i("AA: asking for a key frame (video focus cycle)")
+        Thread({
+            send(Ch.VIDEO, T.VIDEO_FOCUS_NOTIFICATION, AaMessages.videoFocus(projected = false, unsolicited = true), controlType = false)
+            try { Thread.sleep(200) } catch (_: InterruptedException) {}
+            send(Ch.VIDEO, T.VIDEO_FOCUS_NOTIFICATION, AaMessages.videoFocus(projected = true, unsolicited = true), controlType = false)
+        }, "aa-keyframe").apply { isDaemon = true }.start()
     }
 
     // ---------- shutdown ----------

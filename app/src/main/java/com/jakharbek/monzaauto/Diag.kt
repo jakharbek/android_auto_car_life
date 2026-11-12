@@ -33,6 +33,9 @@ object Diag {
     @Volatile var aaUsbAudio: Boolean? = null
     @Volatile var aaMic: Boolean? = null
 
+    /** The service will try to connect to Android Auto again in a moment (last try found no server). */
+    @Volatile var aaRetryPending = false
+
     fun carReset() {
         carStage = CarStage.USB_OPEN
         carClosedReason = null

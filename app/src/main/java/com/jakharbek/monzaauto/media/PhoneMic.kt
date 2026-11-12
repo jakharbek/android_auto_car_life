@@ -29,6 +29,7 @@ class PhoneMic(private val sink: (ByteArray, Long) -> Unit) {
                     AudioFormat.ENCODING_PCM_16BIT, maxOf(min, chunk * 4))
             } catch (e: Exception) {
                 Log.e("MIC: cannot open the microphone", e)
+                synchronized(this) { if (gen == generation) active = false }
                 return@Thread
             }
             try {

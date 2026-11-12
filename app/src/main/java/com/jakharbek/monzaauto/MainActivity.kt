@@ -2,8 +2,6 @@ package com.jakharbek.monzaauto
 
 import android.content.Intent
 import android.graphics.Typeface
-import android.hardware.usb.UsbAccessory
-import android.hardware.usb.UsbManager
 import android.net.Uri
 import android.os.Bundle
 import android.text.InputType
@@ -42,23 +40,8 @@ class MainActivity : BaseActivity() {
         Log.dir = getExternalFilesDir("logs")
         settings = Settings(this)
         setContentView(buildUi())
-        handleIntent(intent)
         if (savedInstanceState == null && !WizardActivity.isDone(this)) {
             startActivity(Intent(this, WizardActivity::class.java))
-        }
-    }
-
-    override fun onNewIntent(intent: Intent) {
-        super.onNewIntent(intent)
-        handleIntent(intent)
-    }
-
-    private fun handleIntent(intent: Intent?) {
-        if (intent?.action == UsbManager.ACTION_USB_ACCESSORY_ATTACHED) {
-            @Suppress("DEPRECATION")
-            val acc = intent.getParcelableExtra<UsbAccessory>(UsbManager.EXTRA_ACCESSORY)
-            Log.i("UI: accessory attached")
-            LinkService.attach(this, acc)
         }
     }
 
