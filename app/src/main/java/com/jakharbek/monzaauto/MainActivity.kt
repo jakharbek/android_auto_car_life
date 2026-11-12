@@ -1,24 +1,15 @@
 package com.jakharbek.monzaauto
 
-import android.Manifest
-import android.app.Activity
-import android.content.ComponentName
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.graphics.Typeface
 import android.hardware.usb.UsbAccessory
 import android.hardware.usb.UsbManager
 import android.net.Uri
-import android.os.Build
 import android.os.Bundle
-import android.provider.Settings as SystemSettings
 import android.text.InputType
-import android.util.TypedValue
-import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
-import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.RadioButton
@@ -26,15 +17,14 @@ import android.widget.RadioGroup
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
-import com.jakharbek.monzaauto.aa.HuCredentials
+import com.jakharbek.monzaauto.setup.Fix
+import com.jakharbek.monzaauto.setup.Probes
+import com.jakharbek.monzaauto.ui.BaseActivity
+import com.jakharbek.monzaauto.ui.DiagnosticsActivity
+import com.jakharbek.monzaauto.ui.Ui
+import com.jakharbek.monzaauto.ui.WizardActivity
 
-class MainActivity : Activity() {
-    companion object {
-        private const val REQ_PERMISSIONS = 1
-        private const val REQ_CERT = 2
-        private const val AA_PACKAGE = "com.google.android.projection.gearhead"
-    }
-
+class MainActivity : BaseActivity() {
     private lateinit var settings: Settings
     private lateinit var statusView: TextView
     private lateinit var certView: TextView
@@ -42,7 +32,7 @@ class MainActivity : Activity() {
     private val renderNow = Runnable { render() }
 
     /** Coalesces frequent log/status updates into one redraw. */
-    private val refresh: () -> Unit = {
+    private val onChange: () -> Unit = {
         statusView.removeCallbacks(renderNow)
         statusView.postDelayed(renderNow, 250)
     }
@@ -52,8 +42,10 @@ class MainActivity : Activity() {
         Log.dir = getExternalFilesDir("logs")
         settings = Settings(this)
         setContentView(buildUi())
-        askPermissions()
         handleIntent(intent)
+        if (savedInstanceState == null && !WizardActivity.isDone(this)) {
+            startActivity(Intent(this, WizardActivity::class.java))
+        }
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -72,104 +64,81 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
-        Status.listen(refresh)
-        Log.listen(refresh)
+        Status.listen(onChange)
+        Log.listen(onChange)
+    }
+
+    override fun onPause() {
+        Status.unlisten(onChange)
+        Log.unlisten(onChange)
+        super.onPause()
+    }
+
+    override fun refresh() {
         renderCert()
         render()
     }
 
-    override fun onPause() {
-        Status.unlisten(refresh)
-        Log.unlisten(refresh)
-        super.onPause()
-    }
-
-    private fun askPermissions() {
-        val want = ArrayList<String>()
-        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) want += Manifest.permission.RECORD_AUDIO
-        if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
-            want += Manifest.permission.POST_NOTIFICATIONS
-        }
-        if (want.isNotEmpty()) requestPermissions(want.toTypedArray(), REQ_PERMISSIONS)
-    }
-
     // ---------- UI ----------
 
-    private fun dp(v: Int) = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, v.toFloat(), resources.displayMetrics).toInt()
-
-    private fun text(s: String, size: Float = 15f, bold: Boolean = false) = TextView(this).apply {
-        text = s
-        textSize = size
-        if (bold) setTypeface(typeface, Typeface.BOLD)
-        setPadding(0, dp(4), 0, dp(4))
-    }
-
-    private fun button(s: String, onClick: () -> Unit) = Button(this).apply {
-        text = s
-        isAllCaps = false
-        setOnClickListener { onClick() }
-    }
-
-    private fun section(title: String) = text(title, 18f, true).apply { setPadding(0, dp(18), 0, dp(6)) }
-
     private fun buildUi(): View {
-        val col = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(16), dp(16), dp(24))
-        }
-        col.addView(text(getString(R.string.app_name), 24f, true))
-        col.addView(text("Android Auto на штатной магнитоле через CarLife", 14f))
+        val col = ui.column(16)
+        col.addView(ui.title(getString(R.string.app_name)))
+        col.addView(ui.muted("Android Auto на штатной магнитоле через CarLife"))
+        col.addView(ui.gap(8))
 
-        statusView = text("", 15f)
-        col.addView(section("Состояние"))
-        col.addView(statusView)
-        col.addView(button("Открыть настройки Android Auto") { openAaSettings() })
-        col.addView(button("Подключить Android Auto снова") { LinkService.command(this, LinkService.ACTION_CONNECT_AA) })
-        col.addView(button("Подключиться к магнитоле") { LinkService.attach(this, null) })
-        col.addView(button("Остановить") { LinkService.command(this, LinkService.ACTION_STOP) })
+        statusView = ui.body("", 15f)
+        col.addView(ui.card(ui.body("Состояние", 16f).apply { setTypeface(typeface, Typeface.BOLD) }, statusView))
+        col.addView(ui.gap(8))
 
-        col.addView(section("Как запустить"))
-        col.addView(text(
-            "1. Android Auto → Настройки → 10 раз нажмите «Версия» (режим разработчика).\n" +
-                "2. Меню ⋮ → «Запустить сервер головного устройства». После каждого обрыва его нужно включить снова.\n" +
-                "3. Подключите телефон кабелем к USB машины и включите CarLife на магнитоле.\n" +
-                "4. Разрешите приложению доступ к USB-устройству, когда телефон спросит.", 14f,
-        ))
+        val top = ui.row()
+        top.addView(ui.button("Мастер настройки") { startActivity(Intent(this, WizardActivity::class.java)) }, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+        top.addView(View(this), LinearLayout.LayoutParams(ui.dp(10), 1))
+        top.addView(ui.button("Диагностика") { startActivity(Intent(this, DiagnosticsActivity::class.java)) }, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+        col.addView(top)
 
-        col.addView(section("Звук"))
+        col.addView(ui.heading("Управление"))
+        col.addView(ui.button("Открыть настройки Android Auto", primary = false) { openAaSettings() }, ui.fullWidth())
+        col.addView(ui.button("Подключить Android Auto снова", primary = false) { perform(Fix.CONNECT_AA) }, ui.fullWidth())
+        col.addView(ui.button("Подключиться к магнитоле", primary = false) { perform(Fix.ATTACH_CAR) }, ui.fullWidth())
+        col.addView(ui.button("Остановить", primary = false) { LinkService.command(this, LinkService.ACTION_STOP) }, ui.fullWidth())
+
+        col.addView(ui.heading("Звук"))
         val group = RadioGroup(this)
         val options = listOf(
             Settings.Audio.AUTO to "Авто (как скажет магнитола)",
             Settings.Audio.USB to "Через USB в магнитолу",
-            Settings.Audio.PHONE to "С телефона (Bluetooth)",
+            Settings.Audio.PHONE to "С телефона (Bluetooth машины)",
         )
         for ((value, label) in options) {
             group.addView(RadioButton(this).apply {
                 id = View.generateViewId()
                 text = label
+                textSize = 15f
                 isChecked = settings.audio == value
                 setOnCheckedChangeListener { _, checked -> if (checked) settings.audio = value }
             })
         }
         col.addView(group)
 
-        col.addView(section("Изображение"))
-        col.addView(text("Плотность экрана Android Auto (DPI, ${Settings.DPI_MIN}–${Settings.DPI_MAX}). Больше — крупнее кнопки.", 14f))
+        col.addView(ui.heading("Изображение"))
+        col.addView(ui.muted("Плотность экрана Android Auto (DPI, ${Settings.DPI_MIN}–${Settings.DPI_MAX}): больше — крупнее кнопки и шрифт."))
         col.addView(numberField(settings.dpi) { settings.dpi = it })
-        col.addView(text("Битрейт видео, кбит/с (1000–12000)", 14f))
+        col.addView(ui.muted("Битрейт видео, кбит/с (1000–12000): больше — чётче, но тяжелее для кабеля и магнитолы."))
         col.addView(numberField(settings.bitrateKbps) { settings.bitrateKbps = it })
-        col.addView(text("Изменения применяются при следующем подключении Android Auto.", 13f))
+        col.addView(ui.muted("Изменения применяются при следующем подключении Android Auto."))
 
-        col.addView(section("Сертификат головного устройства"))
-        certView = text("", 14f)
+        col.addView(ui.heading("Сертификат головного устройства"))
+        certView = ui.body("", 14f)
         col.addView(certView)
-        col.addView(button("Загрузить сертификат и ключ (.pem)") { pickCertificate() })
+        col.addView(ui.button("Загрузить сертификат и ключ (.pem)", primary = false) { perform(Fix.LOAD_CERT) }, ui.fullWidth())
 
-        col.addView(section("Журнал"))
-        col.addView(button("Поделиться журналом") { shareLog() })
+        col.addView(ui.heading("Журнал"))
+        col.addView(ui.button("Поделиться журналом", primary = false) { shareLog() }, ui.fullWidth())
         logView = TextView(this).apply {
             typeface = Typeface.MONOSPACE
             textSize = 10f
+            setTextColor(Ui.MUTED)
             setTextIsSelectable(true)
         }
         col.addView(logView)
@@ -178,15 +147,18 @@ class MainActivity : Activity() {
     }
 
     private fun numberField(value: Int, save: (Int) -> Unit): View {
-        val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        val row = ui.row()
         val field = EditText(this).apply {
             inputType = InputType.TYPE_CLASS_NUMBER
             setText(value.toString())
         }
         row.addView(field, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
-        row.addView(button("Сохранить") {
-            field.text.toString().toIntOrNull()?.let {
-                save(it)
+        row.addView(ui.button("Сохранить", primary = false) {
+            val v = field.text.toString().toIntOrNull()
+            if (v == null) {
+                Toast.makeText(this, "Введите число", Toast.LENGTH_SHORT).show()
+            } else {
+                save(v)
                 Toast.makeText(this, "Сохранено", Toast.LENGTH_SHORT).show()
             }
         })
@@ -200,55 +172,9 @@ class MainActivity : Activity() {
     }
 
     private fun renderCert() {
-        certView.text = if (HuCredentials.load(this) != null) "Сертификат есть." else "Сертификата нет — Android Auto не подключится. Загрузите .pem с сертификатом и закрытым ключом."
-    }
-
-    // ---------- actions ----------
-
-    private fun openAaSettings() {
-        val candidates = listOf(
-            Intent().setComponent(ComponentName(AA_PACKAGE, "$AA_PACKAGE.companion.settings.DefaultSettingsActivity")),
-            packageManager.getLaunchIntentForPackage(AA_PACKAGE),
-            Intent(SystemSettings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$AA_PACKAGE")),
-        )
-        for (i in candidates) {
-            if (i == null) continue
-            try {
-                startActivity(i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-                return
-            } catch (_: Exception) {
-            }
-        }
-        Toast.makeText(this, "Android Auto не установлен", Toast.LENGTH_LONG).show()
-    }
-
-    private fun pickCertificate() {
-        val i = Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("*/*")
-            .putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
-        startActivityForResult(i, REQ_CERT)
-    }
-
-    @Deprecated("Activity result API of the platform")
-    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode != REQ_CERT || resultCode != RESULT_OK || data == null) return
-        val uris = ArrayList<Uri>()
-        data.clipData?.let { c -> for (k in 0 until c.itemCount) uris += c.getItemAt(k).uri }
-        data.data?.let { if (it !in uris) uris += it }
-        val text = uris.joinToString("\n") { u ->
-            try {
-                contentResolver.openInputStream(u)?.bufferedReader()?.readText() ?: ""
-            } catch (_: Exception) {
-                ""
-            }
-        }
-        val ok = HuCredentials.import(this, text)
-        Toast.makeText(
-            this,
-            if (ok) "Сертификат сохранён" else "Нужны сертификат (CERTIFICATE) и закрытый ключ (PRIVATE KEY) в формате PEM — выберите оба файла сразу",
-            Toast.LENGTH_LONG,
-        ).show()
-        renderCert()
+        val c = Probes.certificateCheck(this)
+        certView.text = c.detail + (c.todo?.let { "\n$it" } ?: "")
+        certView.setTextColor(Ui.color(c.level))
     }
 
     private fun shareLog() {
@@ -260,6 +186,7 @@ class MainActivity : Activity() {
         val uri = Uri.parse("content://${packageName}.logs/${file.name}")
         val i = Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_STREAM, uri)
             .putExtra(Intent.EXTRA_SUBJECT, "${getString(R.string.app_name)}: ${file.name}")
+            .putExtra(Intent.EXTRA_TEXT, "Журнал Monza Auto")
             .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         startActivity(Intent.createChooser(i, "Журнал"))
     }

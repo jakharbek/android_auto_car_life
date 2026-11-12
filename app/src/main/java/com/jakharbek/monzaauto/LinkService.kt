@@ -172,6 +172,8 @@ class LinkService : Service(), CarLifeEvents, AaEvents {
             return
         }
         Log.i("SVC: accessory ${acc.manufacturer} / ${acc.model} / ${acc.version}")
+        Diag.accessory = "${acc.model} ${acc.version}"
+        Diag.usbPermissionMissing = !um.hasPermission(acc)
         if (!um.hasPermission(acc)) {
             Status.usb = "нет разрешения USB (переподключите кабель)"
             updateUi()

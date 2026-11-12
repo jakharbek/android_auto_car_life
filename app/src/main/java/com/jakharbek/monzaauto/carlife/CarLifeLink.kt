@@ -1,5 +1,6 @@
 package com.jakharbek.monzaauto.carlife
 
+import com.jakharbek.monzaauto.Diag
 import com.jakharbek.monzaauto.Log
 import com.jakharbek.monzaauto.proto.PbIn
 import java.io.InputStream
@@ -89,6 +90,7 @@ class CarLifeLink(
         Thread(::readLoop, "carlife-rx").apply { isDaemon = true }.start()
         Thread(::writeLoop, "carlife-tx").apply { isDaemon = true }.start()
         sched.scheduleWithFixedDelay(::tick, 1000, 500, TimeUnit.MILLISECONDS)
+        Diag.carReset()
         events.onCarState("USB подключён, жду магнитолу")
         Log.i("CL: link started")
     }
@@ -96,6 +98,8 @@ class CarLifeLink(
     fun close(reason: String) {
         if (!closed.compareAndSet(false, true)) return
         Log.i("CL: closing ($reason)")
+        Diag.carStage = Diag.CarStage.CLOSED
+        Diag.carClosedReason = reason
         try {
             writePacket(Packet(Chan.CMD, Msg.MD_EXIT, ByteArray(0)))
         } catch (_: Exception) {
@@ -192,6 +196,7 @@ class CarLifeLink(
                     if (p.data.isNotEmpty()) {
                         videoFrames++
                         videoBytes += p.data.size
+                        Diag.carFramesSent = videoFrames
                     }
                 }
             }
@@ -259,6 +264,8 @@ class CarLifeLink(
                 if (versionSeen) return
                 versionSeen = true
                 huMajor = body.int(1, 1)
+                Diag.huProtocol = "${body.int(1)}.${body.int(2)}"
+                Diag.carStage = Diag.CarStage.TALKING
                 events.onCarState("Магнитола на связи (протокол ${body.int(1)}.${body.int(2)})")
                 cmd(Msg.PROTOCOL_VERSION_MATCH_STATUS, Bodies.matchStatus(true))
                 cmd(Msg.FOREGROUND)
@@ -267,7 +274,10 @@ class CarLifeLink(
                 sched.schedule({ cmd(Msg.MODULE_STATUS, Bodies.moduleStatusAllIdle(huMajor)) }, 500, TimeUnit.MILLISECONDS)
             }
             Msg.CARLIFE_DATA_SUBSCRIBE -> cmd(Msg.CARLIFE_DATA_SUBSCRIBE_DONE, Bodies.subscribeDone(p.data))
-            Msg.HU_INFO -> Log.i("CL: head unit ${body.string(13)} / ${body.string(14)} / ${body.string(15)}, android ${body.string(19)}")
+            Msg.HU_INFO -> {
+                Log.i("CL: head unit ${body.string(13)} / ${body.string(14)} / ${body.string(15)}, android ${body.string(19)}")
+                Diag.huModel = listOfNotNull(body.string(13), body.string(14)).joinToString(" ").ifBlank { null }
+            }
             Msg.STATISTIC_INFO -> {
                 Log.i("CL: head unit channel ${body.string(4)}, version ${body.string(2)}")
                 cmd(Msg.MD_AUTHEN_RESULT, Bodies.authenResult(true))
@@ -281,14 +291,21 @@ class CarLifeLink(
                     cmd(Msg.MD_AUTHEN_RESPONSE, Bodies.authenResponse(answer))
                 } else {
                     Log.w("CL: head unit asks for an unsupported authentication form ($random)")
+                    Diag.authUnsupported = true
                     events.onCarState("Магнитола требует неподдерживаемую авторизацию")
                 }
             }
             Msg.HU_AUTHEN_RESULT -> Log.i("CL: authentication result ${body.bool(1)}")
-            Msg.HU_FEATURE_CONFIG_RESPONSE -> events.onFeatures(Bodies.featureConfig(p.data))
+            Msg.HU_FEATURE_CONFIG_RESPONSE -> {
+                val f = Bodies.featureConfig(p.data)
+                Diag.huFeatures = f
+                events.onFeatures(f)
+            }
             Msg.VIDEO_ENCODER_INIT -> {
                 val fps = body.int(3).let { if (it in 1..60) it else 30 }
                 Log.i("CL: head unit screen ${body.int(1)}x${body.int(2)}, fps ${body.int(3)}; sending ${VIDEO_W}x$VIDEO_H@$fps")
+                Diag.huScreen = "${body.int(1)}×${body.int(2)}"
+                Diag.carStage = Diag.CarStage.VIDEO_SETUP
                 cmd(Msg.VIDEO_ENCODER_INIT_DONE, Bodies.videoInfo(VIDEO_W, VIDEO_H, fps))
                 cmd(Msg.FOREGROUND)
                 initDone = true
@@ -302,6 +319,7 @@ class CarLifeLink(
             Msg.VIDEO_ENCODER_START, Msg.VIDEO_ENCODER_RESET -> startVideo()
             Msg.VIDEO_ENCODER_PAUSE -> {
                 streaming = false
+                Diag.carStage = Diag.CarStage.PAUSED
                 events.onVideoPaused()
                 events.onCarState("Магнитола: видео на паузе")
             }
@@ -316,6 +334,7 @@ class CarLifeLink(
         initDone = true
         streaming = true
         dropUntilKey = false
+        Diag.carStage = Diag.CarStage.STREAMING
         events.onCarState("Магнитола показывает экран")
         events.onVideoWanted()
     }

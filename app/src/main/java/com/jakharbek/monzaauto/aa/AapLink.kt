@@ -1,6 +1,7 @@
 package com.jakharbek.monzaauto.aa
 
 import android.os.SystemClock
+import com.jakharbek.monzaauto.Diag
 import com.jakharbek.monzaauto.Log
 import com.jakharbek.monzaauto.proto.PbIn
 import java.io.ByteArrayOutputStream
@@ -78,6 +79,9 @@ class AapLink(
 
     private fun run() {
         try {
+            Diag.aaReset()
+            Diag.aaUsbAudio = config.usbAudio
+            Diag.aaMic = config.mic
             events.onAaState("Подключаюсь к Android Auto…")
             socket = Socket()
             socket.tcpNoDelay = true
@@ -85,8 +89,10 @@ class AapLink(
             socket.connect(InetSocketAddress(host, port), 5000)
             input = DataInputStream(socket.getInputStream().buffered(64 * 1024))
             output = socket.getOutputStream()
+            Diag.aaStage = Diag.AaStage.HANDSHAKE
             handshake()
             connected = true
+            Diag.aaStage = Diag.AaStage.CONNECTED
             events.onAaState("Android Auto подключён")
             socket.soTimeout = 20_000
             while (!closed.get()) readMessage()
@@ -98,6 +104,11 @@ class AapLink(
                     else -> e.message ?: e.javaClass.simpleName
                 }
                 Log.w("AA: link ended: $reason", e)
+                when (e) {
+                    is java.net.ConnectException -> Diag.aaRefused = true
+                    is java.net.SocketTimeoutException -> Diag.aaTimedOut = true
+                    is javax.net.ssl.SSLException -> Diag.aaTlsFailed = true
+                }
                 shutdown(reason, refused = e is java.net.ConnectException)
             }
         }
@@ -115,6 +126,7 @@ class AapLink(
         val minor = ((b[2].toInt() and 0xFF) shl 8) or (b[3].toInt() and 0xFF)
         val status = ((b[4].toInt() and 0xFF) shl 8) or (b[5].toInt() and 0xFF)
         Log.i("AA: protocol $major.$minor status $status")
+        Diag.aaProtocol = "$major.$minor"
         if (status != 0) throw IOException("Android Auto rejected the protocol version")
 
         engine = credentials.sslContext().createSSLEngine("android-auto", port)
@@ -360,6 +372,7 @@ class AapLink(
                     val withTs = msg.size >= 10 && !startsWithStartCode(msg, 2)
                     val off = if (withTs) 10 else 2
                     val pts = if (withTs) ByteBuffer.wrap(msg, 2, 8).long else SystemClock.elapsedRealtimeNanos() / 1000
+                    Diag.aaFramesReceived++
                     val once = AtomicBoolean(false)
                     events.onVideoFrame(msg.copyOfRange(off, msg.size), pts) { if (once.compareAndSet(false, true)) ack() }
                 }
@@ -373,6 +386,7 @@ class AapLink(
                 val b = PbIn.parse(msg, 2)
                 sessions[Ch.VIDEO] = b.int(1)
                 Log.i("AA: video start, session ${b.int(1)}")
+                Diag.aaStage = Diag.AaStage.VIDEO
                 events.onAaState("Android Auto передаёт картинку")
             }
             T.MEDIA_STOP -> {
@@ -502,6 +516,8 @@ class AapLink(
     private fun shutdown(reason: String, refused: Boolean = false) {
         if (!closed.compareAndSet(false, true)) return
         connected = false
+        Diag.aaStage = Diag.AaStage.CLOSED
+        Diag.aaClosedReason = reason
         try {
             socket.shutdownOutput()
         } catch (_: Exception) {
