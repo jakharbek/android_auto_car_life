@@ -101,6 +101,31 @@ class ScreensTest {
     }
 
     @Test
+    fun diagnosticsFindsAnotherAppForTheHeadUnit() {
+        val ctx = org.robolectric.RuntimeEnvironment.getApplication()
+        val ri = android.content.pm.ResolveInfo().apply {
+            activityInfo = android.content.pm.ActivityInfo().apply {
+                packageName = "com.example.carapp"
+                name = "com.example.carapp.Main"
+                applicationInfo = android.content.pm.ApplicationInfo().apply {
+                    packageName = "com.example.carapp"
+                    nonLocalizedLabel = "Другое приложение"
+                }
+            }
+        }
+        shadowOf(ctx.packageManager).addResolveInfoForIntent(
+            android.content.Intent(android.hardware.usb.UsbManager.ACTION_USB_ACCESSORY_ATTACHED), ri,
+        )
+        val a = Robolectric.buildActivity(DiagnosticsActivity::class.java).setup().get()
+        settle()
+        val t = allText(a)
+        assertTrue(t, t.contains("Приложение по умолчанию для магнитолы"))
+        assertTrue(t, t.contains("«Другое приложение»"))
+        assertTrue(t, t.contains("Настройки «Другое приложение» по умолчанию"))
+        shot(a, "4-diagnostics-default-app")
+    }
+
+    @Test
     fun diagnosticsShowsProblemsWithFixes() {
         Diag.carStage = Diag.CarStage.CLOSED
         Diag.carClosedReason = "USB отключён"

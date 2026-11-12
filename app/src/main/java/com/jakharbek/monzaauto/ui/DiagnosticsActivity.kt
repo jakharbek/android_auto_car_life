@@ -92,7 +92,7 @@ class DiagnosticsActivity : BaseActivity() {
                     },
                 ))
             }
-            box.addView(ui.checkCard(c) { perform(it.fix) }, ui.fullWidth())
+            box.addView(ui.checkCard(c) { perform(it.fix, it.fixArg) }, ui.fullWidth())
             box.addView(ui.gap(10))
         }
     }

@@ -94,6 +94,22 @@ class RulesTest {
     }
 
     @Test
+    fun defaultAppForHeadUnit() {
+        val ok = Rules.defaultApp(emptyList(), attached = false, havePermission = false)
+        assertEquals(Level.OK, ok.level)
+        assertTrue(ok.todo!!.contains("Всегда"))
+        val other = AccessoryApp("com.example.other", "Другое")
+        val warn = Rules.defaultApp(listOf(other), attached = false, havePermission = false)
+        assertEquals(Level.WARN, warn.level)
+        assertEquals(Fix.OPEN_APP_DEFAULTS, warn.fix)
+        assertEquals("com.example.other", warn.fixArg)
+        assertTrue(warn.detail.contains("«Другое»"))
+        // plugged in, but the other app got it
+        assertEquals(Level.FAIL, Rules.defaultApp(listOf(other), attached = true, havePermission = false).level)
+        assertEquals(Level.WARN, Rules.defaultApp(listOf(other), attached = true, havePermission = true).level)
+    }
+
+    @Test
     fun audioAdvice() {
         assertEquals(Level.WARN, Rules.audio("USB", 1).level)
         assertEquals(Level.OK, Rules.audio("USB", 0).level)

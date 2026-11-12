@@ -4,6 +4,7 @@ import android.Manifest
 import android.app.ActivityManager
 import android.app.NotificationManager
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.hardware.usb.UsbManager
 import android.media.MediaCodecList
@@ -94,6 +95,57 @@ object Probes {
         return Rules.video(enc?.name, enc?.isHardwareAccelerated == true, dec?.name)
     }
 
+    /**
+     * Other installed apps that open when the head unit is plugged in: they declare the USB accessory event and
+     * their accessory filter matches it (same rules Android applies: attributes a filter leaves out match anything).
+     */
+    fun otherAccessoryApps(ctx: Context): List<AccessoryApp> {
+        val pm = ctx.packageManager
+        val attached = ctx.getSystemService(UsbManager::class.java).accessoryList?.firstOrNull()
+        val model = attached?.model ?: "CarLife"
+        val handlers = try {
+            pm.queryIntentActivities(Intent(UsbManager.ACTION_USB_ACCESSORY_ATTACHED), PackageManager.GET_META_DATA)
+        } catch (_: Exception) {
+            emptyList()
+        }
+        val out = ArrayList<AccessoryApp>()
+        for (ri in handlers) {
+            val ai = ri.activityInfo ?: continue
+            if (ai.packageName == ctx.packageName) continue
+            val res = ai.metaData?.getInt(UsbManager.ACTION_USB_ACCESSORY_ATTACHED, 0) ?: 0
+            val matches = res == 0 || try {
+                filterMatches(pm.getResourcesForApplication(ai.applicationInfo).getXml(res), model, attached?.manufacturer)
+            } catch (_: Exception) {
+                true // cannot read the filter: better to mention the app than to miss it
+            }
+            if (matches && out.none { it.packageName == ai.packageName }) {
+                out += AccessoryApp(ai.packageName, ai.applicationInfo.loadLabel(pm).toString())
+            }
+        }
+        return out
+    }
+
+    /** True if any usb-accessory entry of the filter accepts this model (and manufacturer, when known). */
+    private fun filterMatches(xml: android.content.res.XmlResourceParser, model: String, manufacturer: String?): Boolean {
+        xml.use { p ->
+            var any = false
+            while (p.next() != org.xmlpull.v1.XmlPullParser.END_DOCUMENT) {
+                if (p.eventType != org.xmlpull.v1.XmlPullParser.START_TAG || p.name != "usb-accessory") continue
+                any = true
+                val m = p.getAttributeValue(null, "model")
+                val mf = p.getAttributeValue(null, "manufacturer")
+                if ((m == null || m == model) && (mf == null || manufacturer == null || mf == manufacturer)) return true
+            }
+            return !any // a filter without entries matches every accessory
+        }
+    }
+
+    fun defaultAppCheck(ctx: Context): Check {
+        val um = ctx.getSystemService(UsbManager::class.java)
+        val acc = um.accessoryList?.firstOrNull()
+        return Rules.defaultApp(otherAccessoryApps(ctx), acc != null, acc != null && um.hasPermission(acc))
+    }
+
     fun usbCheck(ctx: Context): Check {
         val um = ctx.getSystemService(UsbManager::class.java)
         val acc = um.accessoryList?.firstOrNull()
@@ -115,6 +167,7 @@ object Probes {
             Rules.battery(batteryUnrestricted(ctx), backgroundRestricted(ctx)),
             videoCheck(),
             usbCheck(ctx),
+            defaultAppCheck(ctx),
             Rules.car(s),
             Rules.dedupe(Rules.androidAutoLink(s, cert.level == Level.OK || cert.level == Level.WARN), server),
             Rules.audio(Settings(ctx).audio.name, s.huFeatures?.get("AUDIO_TRANSMISSION_MODE")),

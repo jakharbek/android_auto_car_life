@@ -99,7 +99,9 @@ class WizardActivity : BaseActivity() {
                 "4. На магнитоле откройте CarLife. Через несколько секунд появится Android Auto.",
                 "Состояние ниже обновляется само.",
             ),
-            checks = { ctx -> listOf(Probes.usbCheck(ctx), Rules.car(Diag.snapshot()), Rules.androidAutoLink(Diag.snapshot(), true)) },
+            checks = { ctx ->
+                listOf(Probes.usbCheck(ctx), Probes.defaultAppCheck(ctx), Rules.car(Diag.snapshot()), Rules.androidAutoLink(Diag.snapshot(), true))
+            },
             live = true,
         ),
         Step(
@@ -225,7 +227,7 @@ class WizardActivity : BaseActivity() {
                 }
                 for (c in result) {
                     checksBox.addView(ui.gap(10))
-                    checksBox.addView(ui.checkCard(c) { perform(it.fix) }, ui.fullWidth())
+                    checksBox.addView(ui.checkCard(c) { perform(it.fix, it.fixArg) }, ui.fullWidth())
                 }
                 checksBox.addView(ui.gap(10))
             }

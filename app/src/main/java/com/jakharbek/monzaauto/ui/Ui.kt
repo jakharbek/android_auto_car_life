@@ -126,7 +126,7 @@ class Ui(private val ctx: Context) {
         val card = card(head, body(c.detail))
         c.todo?.let { card.addView(body("Что сделать: $it", 14f, MUTED)) }
         if (onFix != null && c.fix.label.isNotEmpty() && c.level != Level.OK) {
-            card.addView(button(c.fix.label) { onFix(c) })
+            card.addView(button(c.fixLabel ?: c.fix.label) { onFix(c) })
         }
         return card
     }

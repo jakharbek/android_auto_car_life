@@ -22,6 +22,7 @@ enum class Fix(val label: String) {
     LOAD_CERT("Загрузить сертификат"),
     CONNECT_AA("Подключить Android Auto"),
     ATTACH_CAR("Подключиться к магнитоле"),
+    OPEN_APP_DEFAULTS("Открыть «Открывать по умолчанию»"),
 }
 
 data class Check(
@@ -33,7 +34,14 @@ data class Check(
     /** What the user should do, if anything. */
     val todo: String? = null,
     val fix: Fix = Fix.NONE,
+    /** Parameter of the fix (a package name for [Fix.OPEN_APP_DEFAULTS]). */
+    val fixArg: String? = null,
+    /** Button text when the generic [Fix.label] is not specific enough. */
+    val fixLabel: String? = null,
 )
+
+/** Another app that can open when the head unit is plugged in. */
+data class AccessoryApp(val packageName: String, val label: String)
 
 /** Result of looking for Android Auto's head unit server without touching it. */
 enum class ServerProbe { RUNNING, NOT_RUNNING, IN_USE_BY_APP, UNKNOWN }
@@ -259,6 +267,41 @@ object Rules {
                 )
             }
         }
+    }
+
+    const val DEFAULT_APP_STEPS =
+        "Как сделать Monza Auto приложением по умолчанию для магнитолы:\n" +
+            "1) если при подключении кабеля появляется окно «Открыть с помощью» — выберите Monza Auto и нажмите «Всегда»;\n" +
+            "2) если открывается другое приложение — в настройках телефона: Приложения → это приложение → " +
+            "«Открывать по умолчанию» (или «Запуск по умолчанию») → «Сбросить настройки по умолчанию» / «Удалить настройки по умолчанию», " +
+            "затем отключите и снова подключите кабель и выберите Monza Auto → «Всегда»;\n" +
+            "3) если окно не появляется и ничего не открывается — откройте Monza Auto и нажмите «Подключиться к магнитоле»."
+
+    /**
+     * Which app opens when the head unit is plugged in. [others]: other installed apps that react to it;
+     * [attached]: the head unit is plugged in now; [havePermission]: Monza Auto got it.
+     */
+    fun defaultApp(others: List<AccessoryApp>, attached: Boolean, havePermission: Boolean): Check {
+        val title = "Приложение по умолчанию для магнитолы"
+        if (others.isEmpty()) {
+            return Check(
+                "default", title, Level.OK,
+                "Кроме Monza Auto, подключение магнитолы не открывает ни одно приложение на телефоне.",
+                DEFAULT_APP_STEPS,
+            )
+        }
+        val names = others.joinToString(", ") { "«${it.label}»" }
+        val first = others.first()
+        val stolen = attached && !havePermission
+        return Check(
+            "default", title, if (stolen) Level.FAIL else Level.WARN,
+            (if (stolen) "Магнитола подключена, но открылась не Monza Auto. " else "") +
+                "Подключение магнитолы могут открывать и другие приложения: $names. " +
+                "Если одно из них выбрано «по умолчанию», Monza Auto не получит подключение.",
+            "Сбросьте «Открывать по умолчанию» у " + (if (others.size > 1) "этих приложений" else "этого приложения") +
+                " (кнопка ниже открывает нужную страницу для ${"«" + first.label + "»"}).\n" + DEFAULT_APP_STEPS,
+            Fix.OPEN_APP_DEFAULTS, first.packageName, "Настройки «${first.label}» по умолчанию",
+        )
     }
 
     /** [mode]: the app setting; [carAudioMode]: AUDIO_TRANSMISSION_MODE from the head unit, if it told us. */

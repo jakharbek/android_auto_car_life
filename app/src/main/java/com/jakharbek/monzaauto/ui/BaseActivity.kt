@@ -32,8 +32,8 @@ abstract class BaseActivity : Activity() {
         refresh()
     }
 
-    fun perform(fix: Fix) {
-        Log.i("UI: fix $fix")
+    fun perform(fix: Fix, arg: String? = null) {
+        Log.i("UI: fix $fix ${arg ?: ""}")
         when (fix) {
             Fix.NONE -> Unit
             Fix.INSTALL_AA -> open(
@@ -57,6 +57,15 @@ abstract class BaseActivity : Activity() {
             Fix.LOAD_CERT -> pickCertificate()
             Fix.CONNECT_AA -> LinkService.command(this, LinkService.ACTION_CONNECT_AA)
             Fix.ATTACH_CAR -> LinkService.attach(this, null)
+            Fix.OPEN_APP_DEFAULTS -> {
+                val pkg = arg ?: packageName
+                val uri = Uri.parse("package:$pkg")
+                if (Build.VERSION.SDK_INT >= 31) {
+                    open(Intent(Settings.ACTION_APP_OPEN_BY_DEFAULT_SETTINGS, uri), Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, uri))
+                } else {
+                    open(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, uri))
+                }
+            }
         }
     }
 
