@@ -127,6 +127,19 @@ class CarLifeTest {
     }
 
     @Test
+    fun heldTapInGestureMode() {
+        val m = TouchMapper(1280, 720)
+        // "long press" arrives early in a held tap, then the click: one DOWN and one UP, never two DOWNs
+        assertEquals(listOf(Touch(0, 0, listOf(Finger(0, 10, 10)))), m.gesture(1, 10, 10))
+        assertEquals(listOf(Touch(1, 0, listOf(Finger(0, 10, 10)))), m.gesture(4, 10, 10))
+        // press, "long press", drag, up
+        m.gesture(1, 50, 50)
+        assertEquals(listOf(Touch(2, 0, listOf(Finger(0, 50, 50)))), m.gesture(1, 50, 50))
+        assertEquals(listOf(Touch(2, 0, listOf(Finger(0, 80, 90)))), m.gesture(2, 80, 90))
+        assertEquals(listOf(Touch(1, 0, listOf(Finger(0, 80, 90)))), m.gesture(3, 80, 90))
+    }
+
+    @Test
     fun clickGesture() {
         val m = TouchMapper(1280, 720)
         val t = m.gesture(4, 2000, 50)

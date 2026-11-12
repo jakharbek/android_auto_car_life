@@ -96,6 +96,18 @@ class LinkService : Service(), CarLifeEvents, AaEvents {
 
     private val carLink get() = car?.link
 
+    private var usbPermissionPending = false
+
+    private val permissionTimeout = Runnable {
+        if (usbPermissionPending && !stopped) {
+            usbPermissionPending = false
+            Log.w("SVC: no answer to the USB permission request")
+            Status.usb = "нет ответа на запрос доступа к USB. Отключите и снова подключите кабель"
+            updateUi()
+            if (aa == null && car == null) stopAll(keepStatus = true)
+        }
+    }
+
     private val stopIfNoCar = Runnable {
         if (car == null && !stopped) {
             Log.i("SVC: car did not come back, stopping")
@@ -177,6 +189,19 @@ class LinkService : Service(), CarLifeEvents, AaEvents {
             else -> {
                 @Suppress("DEPRECATION")
                 val acc = intent?.getParcelableExtra<UsbAccessory>(EXTRA_ACCESSORY)
+                if (intent?.hasExtra(UsbManager.EXTRA_PERMISSION_GRANTED) == true) {
+                    // answer to our USB permission request
+                    main.removeCallbacks(permissionTimeout)
+                    usbPermissionPending = false
+                    if (!intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)) {
+                        Log.w("SVC: USB permission denied")
+                        Status.usb = "доступ к USB не разрешён. Отключите и снова подключите кабель, затем выберите Monza Auto"
+                        updateUi()
+                        if (aa == null) stopAll(keepStatus = true)
+                        return START_NOT_STICKY
+                    }
+                    Log.i("SVC: USB permission granted")
+                }
                 attach(acc)
             }
         }
@@ -208,19 +233,23 @@ class LinkService : Service(), CarLifeEvents, AaEvents {
         Diag.accessory = "${acc.model} ${acc.version}"
         Diag.usbPermissionMissing = !um.hasPermission(acc)
         if (!um.hasPermission(acc)) {
-            // Ask now; when the user allows, the system starts this service again with the accessory.
+            if (usbPermissionPending) return // the dialog is already on screen
+            // Ask once; the service stays in the foreground until the answer comes (allow or deny), at most a minute.
             Log.w("SVC: no permission for the accessory, asking")
             val again = Intent(this, LinkService::class.java).setAction(ACTION_ATTACH).putExtra(EXTRA_ACCESSORY, acc)
             val flags = PendingIntent.FLAG_UPDATE_CURRENT or (if (Build.VERSION.SDK_INT >= 31) PendingIntent.FLAG_MUTABLE else 0)
             try {
-                um.requestPermission(acc, PendingIntent.getForegroundService(this, 2, again, flags))
+                um.requestPermission(acc, PendingIntent.getService(this, 2, again, flags))
+                usbPermissionPending = true
+                main.postDelayed(permissionTimeout, 60_000)
                 Status.usb = "разрешите доступ к USB в окне на экране телефона"
+                updateUi()
             } catch (e: Exception) {
                 Log.e("SVC: USB permission request failed", e)
                 Status.usb = "нет разрешения USB: отключите и снова подключите кабель"
+                updateUi()
+                if (aa == null) stopAll(keepStatus = true)
             }
-            updateUi()
-            if (aa == null) stopAll(keepStatus = true)
             return
         }
         val fd = try {
@@ -446,11 +475,10 @@ class LinkService : Service(), CarLifeEvents, AaEvents {
         releaseVideo()
         isRunning = false
         Status.running = false
-        if (!keepStatus) {
-            Status.usb = "не подключено"
-            Status.car = "—"
-            Status.aa = "—"
-        }
+        // the USB line may keep the message that explains the stop; the others would only be stale
+        if (!keepStatus) Status.usb = "не подключено"
+        Status.car = "—"
+        Status.aa = "—"
         Status.changed()
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()

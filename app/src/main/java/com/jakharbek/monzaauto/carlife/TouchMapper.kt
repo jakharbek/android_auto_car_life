@@ -89,12 +89,19 @@ class TouchMapper(private val maxX: Int, private val maxY: Int) {
         return out
     }
 
-    /** Gesture-style messages: 1 down, 2 move, 3 up, 4 single click. */
-    fun gesture(kind: Int, x: Int, y: Int): List<Touch> = when (kind) {
-        1 -> action(0, x, y, 0, 0)
-        2 -> action(2, x, y, 0, 0)
-        3 -> action(1, x, y, 0, 0)
-        4 -> action(0, x, y, 0, 0) + action(1, x, y, 0, 0)
-        else -> emptyList()
+    /**
+     * Gesture-style messages: 1 down, 2 move, 3 up, 4 single click.
+     * A down or click while a finger is already down continues that gesture instead of starting a new one
+     * (the head unit may send "long press" at the start of every held touch, then the click or the move).
+     */
+    fun gesture(kind: Int, x: Int, y: Int): List<Touch> {
+        val down = slots.isNotEmpty()
+        return when (kind) {
+            1 -> if (down) action(2, x, y, 0, 0) else action(0, x, y, 0, 0)
+            2 -> action(2, x, y, 0, 0)
+            3 -> action(1, x, y, 0, 0)
+            4 -> if (down) action(1, x, y, 0, 0) else action(0, x, y, 0, 0) + action(1, x, y, 0, 0)
+            else -> emptyList()
+        }
     }
 }

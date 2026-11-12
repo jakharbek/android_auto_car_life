@@ -94,6 +94,9 @@ class CarLifeLink(
     @Volatile private var lastKeyAsk = 0L
     @Volatile private var versionAt = 0L
 
+    /** Counts sessions on this cable; timers of an earlier session check it and do nothing. */
+    @Volatile private var session = 0
+
     private fun askKeyFrame() {
         lastKeyAsk = System.currentTimeMillis()
         events.onVideoWanted()
@@ -366,8 +369,9 @@ class CarLifeLink(
                 cmd(Msg.VIDEO_ENCODER_INIT_DONE, Bodies.videoInfo(VIDEO_W, VIDEO_H, fps))
                 cmd(Msg.FOREGROUND)
                 initDone = true
+                val s = session
                 sched.schedule({
-                    if (!started && !closed.get()) {
+                    if (s == session && !started && !closed.get()) {
                         Log.i("CL: no VIDEO_ENCODER_START, starting video anyway")
                         startVideo()
                     }
@@ -393,6 +397,14 @@ class CarLifeLink(
 
     /** Forgets everything about the previous session on this USB connection. */
     private fun restartSession() {
+        session++
+        // nothing of the old session may go out before the new handshake
+        val dropped = ArrayList<Packet>()
+        queue.removeIf { p -> (p.chan != Chan.CMD && p !== exitPacket).also { if (it) dropped += p } }
+        for (p in dropped) {
+            if (p.chan == Chan.VIDEO) queuedVideo.decrementAndGet()
+            if (p.type == Msg.MEDIA_DATA || p.type == Msg.TTS_DATA) queuedAudio.decrementAndGet()
+        }
         initDone = false
         started = false
         streaming = false
@@ -429,7 +441,8 @@ class CarLifeLink(
             Msg.TOUCH_MOVE -> touch.gesture(2, b.int(1), b.int(2))
             Msg.TOUCH_UP -> touch.gesture(3, b.int(1), b.int(2))
             Msg.TOUCH_SINGLE_CLICK, Msg.TOUCH_DOUBLE_CLICK -> touch.gesture(4, b.int(1), b.int(2))
-            // long press comes at press time; the head unit sends TOUCH_UP when the finger lifts
+            // sent early in any held, unmoved press: puts the finger down (or keeps it down); the click,
+            // move or up that follows continues the same gesture
             Msg.TOUCH_LONG_PRESS -> touch.gesture(1, b.int(1), b.int(2))
             Msg.TOUCH_BEGIN -> emptyList()
             Msg.TOUCH_HARD_KEY -> {

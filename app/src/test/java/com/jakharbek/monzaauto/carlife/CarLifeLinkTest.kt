@@ -100,6 +100,8 @@ class CarLifeLinkTest {
 
         hu(Chan.TOUCH, Msg.TOUCH_ACTION, PbOut().int(1, 0).int(2, 640).int(3, 360).toBytes())
         assertEquals("touch 0 [Finger(id=0, x=640, y=360)]", rec.events.poll(3, TimeUnit.SECONDS))
+        hu(Chan.TOUCH, Msg.TOUCH_ACTION, PbOut().int(1, 1).int(2, 640).int(3, 360).toBytes())
+        assertEquals("touch 1 [Finger(id=0, x=640, y=360)]", rec.events.poll(3, TimeUnit.SECONDS))
 
         hu(Chan.TOUCH, Msg.TOUCH_HARD_KEY, PbOut().int(1, HardKey.SEEK_ADD).toBytes())
         assertEquals("key 87", rec.events.poll(3, TimeUnit.SECONDS))

@@ -279,6 +279,7 @@ class Transcoder(
         if (released) return
         Log.w("VIDEO: rebuilding encoder and decoder")
         synchronized(lock) {
+            if (released) return
             handler.removeCallbacks(renderHeld)
             heldIndex = -1
             heldCodec = null
@@ -401,12 +402,13 @@ class Transcoder(
             try { decoder?.stop() } catch (_: Exception) {}
             try { decoder?.release() } catch (_: Exception) {}
             decoder = null
+            // inside the lock, so a rebuild running on the codec thread can never recreate codecs after this
+            try { encoder?.stop() } catch (_: Exception) {}
+            try { encoder?.release() } catch (_: Exception) {}
+            encoder = null
+            inputSurface?.release()
+            inputSurface = null
         }
-        try { encoder?.stop() } catch (_: Exception) {}
-        try { encoder?.release() } catch (_: Exception) {}
-        encoder = null
-        inputSurface?.release()
-        inputSurface = null
         thread.quitSafely()
     }
 }

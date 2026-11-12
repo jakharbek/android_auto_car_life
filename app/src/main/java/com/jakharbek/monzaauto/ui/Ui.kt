@@ -139,7 +139,9 @@ class Ui(private val ctx: Context) {
         if (android.os.Build.VERSION.SDK_INT >= 30) {
             root.setOnApplyWindowInsetsListener { v, insets ->
                 val b = insets.getInsets(android.view.WindowInsets.Type.systemBars() or android.view.WindowInsets.Type.displayCutout())
-                v.setPadding(b.left, b.top, b.right, b.bottom)
+                // the keyboard does not resize an edge-to-edge window: make room for it so fields stay visible
+                val ime = insets.getInsets(android.view.WindowInsets.Type.ime())
+                v.setPadding(b.left, b.top, b.right, maxOf(b.bottom, ime.bottom))
                 insets
             }
             (root as? ViewGroup)?.clipToPadding = false
