@@ -28,16 +28,25 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
 
       - name: Head unit certificate
+        id: cert
         env:
           HU_CERT_PEM: ${{ secrets.HU_CERT_PEM }}
           HU_KEY_PEM: ${{ secrets.HU_KEY_PEM }}
         run: |
+          set -euo pipefail
           if [ -n "$HU_CERT_PEM" ] && [ -n "$HU_KEY_PEM" ]; then
             mkdir -p app/src/main/assets/hu
             printf '%s\n%s\n' "$HU_CERT_PEM" "$HU_KEY_PEM" > app/src/main/assets/hu/hu.pem
-            echo "Certificate added to the APK"
+            # the pair must be readable and belong together, otherwise Android Auto would refuse the APK
+            CERT_MOD=$(openssl x509 -in app/src/main/assets/hu/hu.pem -noout -modulus) || { echo "::error::HU_CERT_PEM is not a readable PEM certificate"; exit 1; }
+            KEY_MOD=$(awk '/-----BEGIN .*PRIVATE KEY-----/,/-----END .*PRIVATE KEY-----/' app/src/main/assets/hu/hu.pem | openssl rsa -noout -modulus 2>/dev/null) || { echo "::error::HU_KEY_PEM is not a readable PEM private key"; exit 1; }
+            [ "$CERT_MOD" = "$KEY_MOD" ] || { echo "::error::HU_KEY_PEM does not belong to HU_CERT_PEM"; exit 1; }
+            openssl x509 -in app/src/main/assets/hu/hu.pem -noout -checkend 2592000 || echo "::warning::the head unit certificate expires within 30 days"
+            echo "Certificate checked and added to the APK"
+            echo "embedded=true" >> "$GITHUB_OUTPUT"
           else
-            echo "::warning::HU_CERT_PEM / HU_KEY_PEM secrets are not set: load the certificate in the app"
+            echo "::warning::HU_CERT_PEM / HU_KEY_PEM secrets are not set: this APK has no certificate and will not be released"
+            echo "embedded=false" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Signing key
@@ -79,6 +88,9 @@ jobs:
           VER=$(sed -n 's/^ *versionName = "\(.*\)"/\1/p' app/build.gradle.kts)
           OUT="monza-auto-$VER.apk"
           cp app/build/outputs/apk/release/app-release.apk "$OUT"
+          if [ "${{ steps.cert.outputs.embedded }}" = "true" ]; then
+            unzip -l "$OUT" | grep -q "assets/hu/hu.pem" || { echo "::error::certificate missing from the APK"; exit 1; }
+          fi
           echo "version=$VER" >> "$GITHUB_OUTPUT"
           echo "file=$OUT" >> "$GITHUB_OUTPUT"
           # a release is made once per version: the published APK always matches its tag
@@ -98,6 +110,7 @@ jobs:
         if: >-
           (github.ref == format('refs/heads/{0}', github.event.repository.default_branch) || github.event_name == 'workflow_dispatch')
           && steps.apk.outputs.new == 'true' && steps.signing.outputs.permanent == 'true'
+          && steps.cert.outputs.embedded == 'true'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ steps.apk.outputs.version }}

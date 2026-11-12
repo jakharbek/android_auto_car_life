@@ -67,7 +67,7 @@ class MainActivity : BaseActivity() {
     private fun buildUi(): View {
         val col = ui.column(16)
         col.addView(ui.title(getString(R.string.app_name)))
-        col.addView(ui.muted("Android Auto на штатной магнитоле через CarLife"))
+        col.addView(ui.muted("Android Auto на штатной магнитоле через CarLife · версия ${BuildConfig.VERSION_NAME}"))
         col.addView(ui.gap(8))
 
         statusView = ui.body("", 15f)
