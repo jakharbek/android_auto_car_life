@@ -284,6 +284,17 @@ object Rules {
         }
     }
 
+    /**
+     * The link check repeats the server check when the last connection was refused because the server is not
+     * running: show the problem once, as the server check, and keep the link check as a pointer to it.
+     */
+    fun dedupe(link: Check, server: Check): Check =
+        if (link.level == Level.FAIL && link.fix == Fix.OPEN_AA_SETTINGS && server.level == Level.FAIL && server.fix == Fix.OPEN_AA_SETTINGS) {
+            link.copy(level = Level.INFO, detail = "Не подключено: сервер головного устройства не запущен (см. выше).", todo = null, fix = Fix.NONE)
+        } else {
+            link
+        }
+
     /** Most severe first; stable within a level. */
     fun sorted(checks: List<Check>): List<Check> = checks.sortedBy { it.level.ordinal }
 

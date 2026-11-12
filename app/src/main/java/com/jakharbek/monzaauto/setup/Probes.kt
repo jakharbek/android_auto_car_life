@@ -105,17 +105,18 @@ object Probes {
         val s = Diag.snapshot()
         val (aaVer, aaEnabled) = aaVersion(ctx)
         val cert = certificateCheck(ctx)
+        val server = Rules.server(serverProbe(), s)
         val checks = listOf(
             Rules.androidAuto(aaVer, aaEnabled),
             cert,
-            Rules.server(serverProbe(), s),
+            server,
             Rules.microphone(micGranted(ctx)),
             Rules.notifications(notificationsGranted(ctx), Build.VERSION.SDK_INT),
             Rules.battery(batteryUnrestricted(ctx), backgroundRestricted(ctx)),
             videoCheck(),
             usbCheck(ctx),
             Rules.car(s),
-            Rules.androidAutoLink(s, cert.level == Level.OK || cert.level == Level.WARN),
+            Rules.dedupe(Rules.androidAutoLink(s, cert.level == Level.OK || cert.level == Level.WARN), server),
             Rules.audio(Settings(ctx).audio.name, s.huFeatures?.get("AUDIO_TRANSMISSION_MODE")),
         )
         return Rules.sorted(checks)

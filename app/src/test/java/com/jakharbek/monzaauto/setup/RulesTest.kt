@@ -79,6 +79,17 @@ class RulesTest {
     }
 
     @Test
+    fun linkProblemShownOnceWhenServerIsDown() {
+        val server = Rules.server(ServerProbe.NOT_RUNNING, snap())
+        val link = Rules.androidAutoLink(snap(aa = AaStage.CLOSED, refused = true), true)
+        val d = Rules.dedupe(link, server)
+        assertEquals(Level.INFO, d.level)
+        assertEquals(Fix.NONE, d.fix)
+        // when the server is up again, a refusal is still reported in full
+        assertEquals(Level.FAIL, Rules.dedupe(link, Rules.server(ServerProbe.RUNNING, snap())).level)
+    }
+
+    @Test
     fun audioAdvice() {
         assertEquals(Level.WARN, Rules.audio("USB", 1).level)
         assertEquals(Level.OK, Rules.audio("USB", 0).level)

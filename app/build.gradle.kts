@@ -50,9 +50,13 @@ android {
 
     testOptions {
         unitTests.isReturnDefaultValues = true
+        // screen tests run the real UI code on the JVM
+        unitTests.isIncludeAndroidResources = true
     }
 }
 
 dependencies {
     testImplementation("junit:junit:4.13.2")
+    // tests only: runs the screens on the JVM; nothing of it goes into the APK
+    testImplementation("org.robolectric:robolectric:4.17")
 }
