@@ -34,13 +34,16 @@ import java.io.FileOutputStream
 
 /**
  * Keeps the bridge running: the head unit on USB on one side, Android Auto on the other.
- * All state changes run on the main thread; link callbacks are posted here.
+ * All state changes run on the main thread; link callbacks are posted here and ignored when they come
+ * from a link that is no longer the current one.
  */
 class LinkService : Service(), CarLifeEvents, AaEvents {
     companion object {
         const val ACTION_ATTACH = "com.jakharbek.monzaauto.ATTACH"
         const val ACTION_STOP = "com.jakharbek.monzaauto.STOP"
         const val ACTION_CONNECT_AA = "com.jakharbek.monzaauto.CONNECT_AA"
+        /** Sent by a screen in front when the microphone permission was just granted. */
+        const val ACTION_PERMISSIONS_CHANGED = "com.jakharbek.monzaauto.PERMISSIONS_CHANGED"
         const val EXTRA_ACCESSORY = "accessory"
 
         private const val NOTIFICATION_ID = 1
@@ -54,14 +57,19 @@ class LinkService : Service(), CarLifeEvents, AaEvents {
 
         private const val AA_RETRY_MS = 3000L
 
+        @Volatile var isRunning = false
+            private set
+
         fun attach(context: Context, accessory: UsbAccessory?) {
             val i = Intent(context, LinkService::class.java).setAction(ACTION_ATTACH)
             if (accessory != null) i.putExtra(EXTRA_ACCESSORY, accessory)
             context.startForegroundService(i)
         }
 
+        /** Commands for a running service; [ACTION_CONNECT_AA] also starts it. */
         fun command(context: Context, action: String) {
-            context.startService(Intent(context, LinkService::class.java).setAction(action))
+            if (action != ACTION_CONNECT_AA && !isRunning) return
+            context.startForegroundService(Intent(context, LinkService::class.java).setAction(action))
         }
     }
 
@@ -69,17 +77,24 @@ class LinkService : Service(), CarLifeEvents, AaEvents {
     private lateinit var settings: Settings
     private var wakeLock: PowerManager.WakeLock? = null
 
-    private var pfd: ParcelFileDescriptor? = null
-    @Volatile private var car: CarLifeLink? = null
+    /** One USB connection: the protocol link and the file descriptor it reads and writes. */
+    private class CarConn(val link: CarLifeLink, val pfd: ParcelFileDescriptor)
+
+    @Volatile private var car: CarConn? = null
     @Volatile private var aa: AapLink? = null
     @Volatile private var video: Transcoder? = null
     private var mic: PhoneMic? = null
     private var stopped = false
 
+    /** The foreground service currently includes the microphone type (needed to record with the screen off). */
+    private var foregroundMic = false
+
     /** Head unit feature AUDIO_TRANSMISSION_MODE: 1 = the car plays phone sound over Bluetooth. */
     private var carWantsBluetoothAudio: Boolean? = null
     private var aaConnectScheduled = false
     private var aaGaveUp = false
+
+    private val carLink get() = car?.link
 
     private val stopIfNoCar = Runnable {
         if (car == null && !stopped) {
@@ -99,6 +114,7 @@ class LinkService : Service(), CarLifeEvents, AaEvents {
         goForeground()
         wakeLock = getSystemService(PowerManager::class.java)
             .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "monzaauto:link").apply { acquire(12 * 3600_000L) }
+        isRunning = true
         Status.running = true
         Status.changed()
         Log.i("SVC: started, app ${BuildConfig.VERSION_NAME}, android ${Build.VERSION.RELEASE}, ${Build.MANUFACTURER} ${Build.MODEL}")
@@ -106,16 +122,21 @@ class LinkService : Service(), CarLifeEvents, AaEvents {
 
     private fun micAllowed() = checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
 
+    /** (Re)enters the foreground; adds the microphone type when it is allowed. */
     private fun goForeground() {
         val n = notification()
-        var type = ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
-        if (micAllowed() && Build.VERSION.SDK_INT >= 30) type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
-        try {
-            startForeground(NOTIFICATION_ID, n, type)
-        } catch (e: Exception) {
-            Log.w("SVC: foreground with microphone refused, continuing without it", e)
-            startForeground(NOTIFICATION_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
+        val base = ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
+        if (micAllowed() && Build.VERSION.SDK_INT >= 30) {
+            try {
+                startForeground(NOTIFICATION_ID, n, base or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
+                foregroundMic = true
+                return
+            } catch (e: Exception) {
+                Log.w("SVC: foreground with microphone refused, continuing without it", e)
+            }
         }
+        startForeground(NOTIFICATION_ID, n, base)
+        foregroundMic = Build.VERSION.SDK_INT < 30 && micAllowed()
     }
 
     private fun notification(): Notification {
@@ -133,20 +154,26 @@ class LinkService : Service(), CarLifeEvents, AaEvents {
 
     private fun updateUi() {
         Status.changed()
-        getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, notification())
+        if (!stopped) getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, notification())
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (stopped) {
-            stopSelf()
-            return START_NOT_STICKY
+            // Started again while stopping: become a normal running service again.
+            Log.i("SVC: restarted while stopping")
+            stopped = false
+            isRunning = true
+            Status.running = true
         }
+        // Every start through startForegroundService must be answered with startForeground.
+        goForeground()
         when (intent?.action) {
             ACTION_STOP -> stopAll()
             ACTION_CONNECT_AA -> {
                 aaGaveUp = false
-                connectAa()
+                if (carLink == null) attach(null) else connectAa()
             }
+            ACTION_PERMISSIONS_CHANGED -> Log.i("SVC: permissions changed, microphone in foreground: $foregroundMic")
             else -> {
                 @Suppress("DEPRECATION")
                 val acc = intent?.getParcelableExtra<UsbAccessory>(EXTRA_ACCESSORY)
@@ -159,7 +186,7 @@ class LinkService : Service(), CarLifeEvents, AaEvents {
     // ---------- head unit ----------
 
     private fun attach(given: UsbAccessory?) {
-        if (car?.isClosed == false) {
+        if (carLink?.isClosed == false) {
             Log.i("SVC: already connected to the car")
             return
         }
@@ -181,7 +208,12 @@ class LinkService : Service(), CarLifeEvents, AaEvents {
             if (aa == null) stopAll()
             return
         }
-        val fd = um.openAccessory(acc)
+        val fd = try {
+            um.openAccessory(acc)
+        } catch (e: Exception) {
+            Log.e("SVC: openAccessory failed", e)
+            null
+        }
         if (fd == null) {
             Status.usb = "не удалось открыть USB"
             updateUi()
@@ -190,10 +222,9 @@ class LinkService : Service(), CarLifeEvents, AaEvents {
         }
         main.removeCallbacks(stopIfNoCar)
         if (aa == null) aaGaveUp = false
-        pfd = fd
         Status.usb = "подключено (${acc.model})"
         val link = CarLifeLink(FileInputStream(fd.fileDescriptor), FileOutputStream(fd.fileDescriptor), phoneInfo(), this)
-        car = link
+        car = CarConn(link, fd)
         link.start()
         updateUi()
         if (aa == null && !aaConnectScheduled) {
@@ -211,20 +242,40 @@ class LinkService : Service(), CarLifeEvents, AaEvents {
         sdkInt = Build.VERSION.SDK_INT,
     )
 
+    /** Closes the descriptor a moment later, after the link had its chance to send its goodbye. */
+    private fun closeLater(pfd: ParcelFileDescriptor) {
+        Thread({
+            try { Thread.sleep(500) } catch (_: InterruptedException) {}
+            try { pfd.close() } catch (_: Exception) {}
+        }, "usb-close").apply { isDaemon = true }.start()
+    }
+
     override fun onCarState(state: String) = main.post {
+        if (stopped) return@post
         Status.car = state
         updateUi()
     }.let {}
 
     override fun onFeatures(features: Map<String, Int>) = main.post {
+        if (stopped) return@post
         Log.i("SVC: car features $features")
         carWantsBluetoothAudio = features["AUDIO_TRANSMISSION_MODE"] == 1
         if (aa == null) connectAa()
     }.let {}
 
-    override fun onVideoWanted() = main.post { video?.wantKeyFrame() }.let {}
+    /** Called on the link thread right before it opens the gate for frames: ask for the key frame at once. */
+    override fun onVideoWanted() {
+        video?.wantKeyFrame()
+    }
 
     override fun onVideoPaused() = Unit
+
+    override fun onFrameRate(fps: Int) {
+        lastCarFps = fps
+        video?.setMaxFps(fps)
+    }
+
+    @Volatile private var lastCarFps = 30
 
     override fun onTouch(t: Touch) {
         aa?.sendTouch(t.action, t.index, t.fingers.map { Triple(it.id, it.x, it.y) })
@@ -234,12 +285,13 @@ class LinkService : Service(), CarLifeEvents, AaEvents {
         aa?.sendKey(androidKeyCode)
     }
 
-    override fun onCarClosed(reason: String) = main.post {
+    override fun onCarClosed(link: CarLifeLink, reason: String) = main.post {
+        val conn = car
+        if (conn == null || conn.link !== link) return@post // an older connection: its descriptor is already handled
+        car = null
+        closeLater(conn.pfd)
         if (stopped) return@post
         Log.i("SVC: car link closed: $reason")
-        car = null
-        try { pfd?.close() } catch (_: Exception) {}
-        pfd = null
         Status.usb = "отключено"
         Status.car = reason
         updateUi()
@@ -257,8 +309,8 @@ class LinkService : Service(), CarLifeEvents, AaEvents {
 
     private fun connectAa() {
         aaConnectScheduled = false
-        if (aa != null || aaGaveUp) return
-        if (car == null) return
+        if (stopped || aa != null || aaGaveUp) return
+        if (carLink == null) return
         val creds = HuCredentials.load(this)
         if (creds == null) {
             Status.aa = "нет сертификата головного устройства (загрузите в приложении)"
@@ -266,23 +318,29 @@ class LinkService : Service(), CarLifeEvents, AaEvents {
             Log.e("SVC: head unit certificate is missing")
             return
         }
-        val config = HeadUnitConfig(dpi = settings.dpi, usbAudio = usbAudio(), mic = micAllowed())
+        // Declare the microphone only if it can really record in the background.
+        if (micAllowed() && !foregroundMic) goForeground()
+        val config = HeadUnitConfig(dpi = settings.dpi, usbAudio = usbAudio(), mic = micAllowed() && foregroundMic)
         val link = AapLink(creds, config, this)
         aa = link
         link.start()
     }
 
     override fun onAaState(state: String) = main.post {
+        if (stopped) return@post
         Status.aa = state
         updateUi()
     }.let {}
 
     override fun onVideoConfig(data: ByteArray) {
         val t = synchronized(this) {
-            video ?: Transcoder(CarLifeLink.VIDEO_W, CarLifeLink.VIDEO_H, settings.bitrateKbps * 1000, 30) { frame, key ->
-                car?.sendVideo(frame, key)
-            }.also {
+            video ?: Transcoder(
+                CarLifeLink.VIDEO_W, CarLifeLink.VIDEO_H, settings.bitrateKbps * 1000, 30,
+                output = { frame, key -> carLink?.sendVideo(frame, key) },
+                needSourceKeyFrame = { aa?.requestKeyFrame() },
+            ).also {
                 it.start()
+                it.setMaxFps(lastCarFps)
                 video = it
             }
         }
@@ -299,7 +357,7 @@ class LinkService : Service(), CarLifeEvents, AaEvents {
     override fun onVideoStopped() = Unit
 
     override fun onAudio(channel: Int, pcm: ByteArray) {
-        val c = car ?: return
+        val c = carLink ?: return
         when (channel) {
             Ch.MEDIA -> c.sendMedia(pcm)
             Ch.SPEECH -> c.sendSpeech(pcm)
@@ -307,7 +365,7 @@ class LinkService : Service(), CarLifeEvents, AaEvents {
     }
 
     override fun onAudioStopped(channel: Int) {
-        val c = car ?: return
+        val c = carLink ?: return
         when (channel) {
             Ch.MEDIA -> c.stopMedia()
             Ch.SPEECH -> c.stopSpeech()
@@ -315,6 +373,7 @@ class LinkService : Service(), CarLifeEvents, AaEvents {
     }
 
     override fun onMicRequest(open: Boolean) = main.post {
+        if (stopped) return@post
         if (open && micAllowed()) {
             val m = mic ?: PhoneMic { pcm, ts -> aa?.sendMic(pcm, ts) }.also { mic = it }
             m.start()
@@ -323,16 +382,14 @@ class LinkService : Service(), CarLifeEvents, AaEvents {
         }
     }.let {}
 
-    override fun onAaClosed(reason: String, refused: Boolean) = main.post {
-        if (stopped) return@post
-        Log.i("SVC: Android Auto closed: $reason")
+    override fun onAaClosed(link: AapLink, reason: String, refused: Boolean) = main.post {
+        if (aa !== link) return@post // an older session
         aa = null
         mic?.stop()
-        synchronized(this) {
-            video?.release()
-            video = null
-        }
-        if (refused && car != null) {
+        releaseVideo()
+        if (stopped) return@post
+        Log.i("SVC: Android Auto closed: $reason")
+        if (refused && carLink != null) {
             Status.aa = "Включите «сервер головного устройства» в Android Auto"
             main.postDelayed({ connectAa() }, AA_RETRY_MS)
         } else {
@@ -341,6 +398,15 @@ class LinkService : Service(), CarLifeEvents, AaEvents {
         }
         updateUi()
     }.let {}
+
+    private fun releaseVideo() {
+        val v = synchronized(this) {
+            val v = video
+            video = null
+            v
+        }
+        v?.release()
+    }
 
     // ---------- stop ----------
 
@@ -351,16 +417,16 @@ class LinkService : Service(), CarLifeEvents, AaEvents {
         main.removeCallbacksAndMessages(null)
         val a = aa
         aa = null
-        if (a != null) Thread { a.close() }.start()
-        car?.close("остановлено")
+        if (a != null) Thread({ a.close() }, "aa-close").start()
+        val c = car
         car = null
-        mic?.stop()
-        synchronized(this) {
-            video?.release()
-            video = null
+        if (c != null) {
+            c.link.close("остановлено")
+            closeLater(c.pfd)
         }
-        try { pfd?.close() } catch (_: Exception) {}
-        pfd = null
+        mic?.stop()
+        releaseVideo()
+        isRunning = false
         Status.running = false
         Status.usb = "не подключено"
         Status.car = "—"
@@ -371,7 +437,9 @@ class LinkService : Service(), CarLifeEvents, AaEvents {
     }
 
     override fun onDestroy() {
+        if (!stopped) stopAll()
         wakeLock?.let { if (it.isHeld) it.release() }
+        isRunning = false
         Status.running = false
         Status.changed()
         super.onDestroy()

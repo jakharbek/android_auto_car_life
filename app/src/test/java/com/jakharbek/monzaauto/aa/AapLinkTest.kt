@@ -118,7 +118,7 @@ class AapLinkTest {
             override fun onAudio(channel: Int, pcm: ByteArray) { events += "audio $channel ${pcm.size}" }
             override fun onAudioStopped(channel: Int) = Unit
             override fun onMicRequest(open: Boolean) { events += "mic $open" }
-            override fun onAaClosed(reason: String, refused: Boolean) { events += "closed" }
+            override fun onAaClosed(link: AapLink, reason: String, refused: Boolean) { events += "closed" }
         }, port = server.localPort)
         link.start()
 

@@ -110,6 +110,23 @@ class CarLifeTest {
     }
 
     @Test
+    fun firstFingerLiftsThenNewFingerLands() {
+        val m = TouchMapper(1280, 720)
+        m.action(0, 100, 100, 0, 0)
+        m.action(5 or (1 shl 8), 100, 100, 500, 500)
+        // finger in slot 0 (id 0) lifts; the other one (id 1) moves to slot 0
+        assertEquals(listOf(Touch(6, 0, listOf(Finger(0, 100, 100), Finger(1, 500, 500)))), m.action(6, 100, 100, 500, 500))
+        assertEquals(listOf(Touch(2, 0, listOf(Finger(1, 520, 520)))), m.action(2, 520, 520, 0, 0))
+        // a new finger lands: only POINTER_DOWN, the old finger keeps id 1, the new one gets the free id 0
+        val down = m.action(5 or (1 shl 8), 530, 530, 50, 60)
+        assertEquals(listOf(Touch(5, 0, listOf(Finger(0, 50, 60), Finger(1, 530, 530)))), down)
+        // moves keep each id on its own finger
+        assertEquals(listOf(Touch(2, 0, listOf(Finger(0, 55, 65), Finger(1, 540, 540)))), m.action(2, 540, 540, 55, 65))
+        assertEquals(listOf(Touch(6, 0, listOf(Finger(0, 55, 65), Finger(1, 540, 540)))), m.action(6 or (1 shl 8), 540, 540, 55, 65))
+        assertEquals(listOf(Touch(1, 0, listOf(Finger(1, 545, 545)))), m.action(1, 545, 545, 0, 0))
+    }
+
+    @Test
     fun clickGesture() {
         val m = TouchMapper(1280, 720)
         val t = m.gesture(4, 2000, 50)

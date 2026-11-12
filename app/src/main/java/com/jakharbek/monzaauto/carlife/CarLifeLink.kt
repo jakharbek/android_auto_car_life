@@ -2,6 +2,7 @@ package com.jakharbek.monzaauto.carlife
 
 import com.jakharbek.monzaauto.Diag
 import com.jakharbek.monzaauto.Log
+import com.jakharbek.monzaauto.media.H264
 import com.jakharbek.monzaauto.proto.PbIn
 import java.io.InputStream
 import java.io.OutputStream
@@ -21,6 +22,9 @@ interface CarLifeEvents {
 
     fun onVideoPaused()
 
+    /** The head unit wants at most this many frames per second. */
+    fun onFrameRate(fps: Int)
+
     fun onTouch(t: Touch)
 
     /** Android key code for a head unit button. */
@@ -29,7 +33,7 @@ interface CarLifeEvents {
     /** Feature list from the head unit (once per session). */
     fun onFeatures(features: Map<String, Int>)
 
-    fun onCarClosed(reason: String)
+    fun onCarClosed(link: CarLifeLink, reason: String)
 }
 
 /**
@@ -59,11 +63,16 @@ class CarLifeLink(
         private const val VIDEO_KEEPALIVE_MS = 2000L
 
         private const val TTS_STOP_DELAY_MS = 1500L
+
+        /** Audio packets waiting for USB above this count are dropped (about 1.5 s of music). */
+        private const val MAX_QUEUED_AUDIO = 80
     }
 
     private val closed = AtomicBoolean(false)
     private val queue = LinkedBlockingDeque<Packet>()
     private val queuedVideo = AtomicInteger(0)
+    private val queuedAudio = AtomicInteger(0)
+    private val exitPacket = Packet(Chan.CMD, Msg.MD_EXIT, ByteArray(0))
     private val sched: ScheduledExecutorService = Executors.newSingleThreadScheduledExecutor { r ->
         Thread(r, "carlife-timer").apply { isDaemon = true }
     }
@@ -79,6 +88,10 @@ class CarLifeLink(
         private set
 
     @Volatile private var dropUntilKey = false
+
+    /** Until a frame starting with SPS goes out, nothing else may: the head unit decoder starts from SPS+PPS+IDR. */
+    @Volatile private var needSps = true
+    private var audioDropLogged = false
     @Volatile private var lastVideoTx = 0L
     @Volatile private var mediaInited = false
     @Volatile private var ttsActive = false
@@ -100,16 +113,17 @@ class CarLifeLink(
         Log.i("CL: closing ($reason)")
         Diag.carStage = Diag.CarStage.CLOSED
         Diag.carClosedReason = reason
-        try {
-            writePacket(Packet(Chan.CMD, Msg.MD_EXIT, ByteArray(0)))
-        } catch (_: Exception) {
-        }
         sched.shutdownNow()
+        // The writer sends MD_EXIT and stops; the streams are closed shortly after on a separate thread,
+        // so a head unit that stopped reading can never block the caller (often the main thread).
         queue.clear()
-        queue.offer(Packet(0, 0, ByteArray(0))) // wakes the writer
-        try { input.close() } catch (_: Exception) {}
-        try { output.close() } catch (_: Exception) {}
-        events.onCarClosed(reason)
+        queue.offer(exitPacket)
+        Thread({
+            try { Thread.sleep(300) } catch (_: InterruptedException) {}
+            try { input.close() } catch (_: Exception) {}
+            try { output.close() } catch (_: Exception) {}
+        }, "carlife-close").apply { isDaemon = true }.start()
+        events.onCarClosed(this, reason)
     }
 
     val isClosed get() = closed.get()
@@ -124,6 +138,11 @@ class CarLifeLink(
     /** One encoded H.264 access unit (Annex-B). */
     fun sendVideo(frame: ByteArray, key: Boolean) {
         if (closed.get() || !streaming) return
+        if (needSps) {
+            if (!H264.startsWithSps(frame)) return
+            needSps = false
+            Log.i("CL: video starts with SPS/PPS + key frame")
+        }
         if (dropUntilKey) {
             if (!key) return
             dropUntilKey = false
@@ -146,7 +165,21 @@ class CarLifeLink(
             queue.offer(Packet(Chan.MEDIA, Msg.MEDIA_INIT, Bodies.audioInit(48000, 2, 16)))
             cmd(Msg.MODULE_STATUS, Bodies.moduleStatus(3, 1))
         }
-        queue.offer(Packet(Chan.MEDIA, Msg.MEDIA_DATA, pcm))
+        offerAudio(Packet(Chan.MEDIA, Msg.MEDIA_DATA, pcm))
+    }
+
+    /** Audio is dropped rather than queued without limit when USB cannot keep up. */
+    private fun offerAudio(p: Packet) {
+        if (queuedAudio.get() >= MAX_QUEUED_AUDIO) {
+            if (!audioDropLogged) {
+                audioDropLogged = true
+                Log.w("CL: USB too slow for audio, dropping sound")
+            }
+            return
+        }
+        audioDropLogged = false
+        queuedAudio.incrementAndGet()
+        queue.offer(p)
     }
 
     fun stopMedia() {
@@ -166,14 +199,14 @@ class CarLifeLink(
             cmd(Msg.MODULE_STATUS, Bodies.moduleStatus(2, 1))
             queue.offer(Packet(Chan.TTS, Msg.TTS_INIT, Bodies.audioInit(16000, 1, 16)))
         }
-        queue.offer(Packet(Chan.TTS, Msg.TTS_DATA, pcm))
+        offerAudio(Packet(Chan.TTS, Msg.TTS_DATA, pcm))
     }
 
     @Synchronized
     fun stopSpeech() {
         if (!ttsActive || closed.get()) return
         ttsStopTask?.cancel(false)
-        ttsStopTask = sched.schedule({
+        ttsStopTask = try { sched.schedule({
             synchronized(this) {
                 if (ttsActive) {
                     ttsActive = false
@@ -181,15 +214,20 @@ class CarLifeLink(
                     cmd(Msg.MODULE_STATUS, Bodies.moduleStatus(2, 0))
                 }
             }
-        }, TTS_STOP_DELAY_MS, TimeUnit.MILLISECONDS)
+        }, TTS_STOP_DELAY_MS, TimeUnit.MILLISECONDS) } catch (_: java.util.concurrent.RejectedExecutionException) { null }
     }
 
     private fun writeLoop() {
         try {
-            while (!closed.get()) {
+            while (true) {
                 val p = queue.take()
-                if (closed.get()) break
+                if (p === exitPacket) {
+                    try { writePacket(p) } catch (_: Exception) {}
+                    break
+                }
+                if (closed.get()) continue
                 if (p.chan == Chan.VIDEO) queuedVideo.decrementAndGet()
+                if (p.type == Msg.MEDIA_DATA || p.type == Msg.TTS_DATA) queuedAudio.decrementAndGet()
                 writePacket(p)
                 if (p.chan == Chan.VIDEO) {
                     lastVideoTx = System.currentTimeMillis()
@@ -305,6 +343,7 @@ class CarLifeLink(
                 val fps = body.int(3).let { if (it in 1..60) it else 30 }
                 Log.i("CL: head unit screen ${body.int(1)}x${body.int(2)}, fps ${body.int(3)}; sending ${VIDEO_W}x$VIDEO_H@$fps")
                 Diag.huScreen = "${body.int(1)}×${body.int(2)}"
+                events.onFrameRate(fps)
                 Diag.carStage = Diag.CarStage.VIDEO_SETUP
                 cmd(Msg.VIDEO_ENCODER_INIT_DONE, Bodies.videoInfo(VIDEO_W, VIDEO_H, fps))
                 cmd(Msg.FOREGROUND)
@@ -323,7 +362,12 @@ class CarLifeLink(
                 events.onVideoPaused()
                 events.onCarState("Магнитола: видео на паузе")
             }
-            Msg.VIDEO_ENCODER_FRAME_RATE_CHANGE -> cmd(Msg.VIDEO_ENCODER_FRAME_RATE_CHANGE_DONE, Bodies.frameRate(body.int(1, 30)))
+            Msg.VIDEO_ENCODER_FRAME_RATE_CHANGE -> {
+                val fps = body.int(1, 30).coerceIn(1, 60)
+                events.onFrameRate(fps)
+                cmd(Msg.VIDEO_ENCODER_FRAME_RATE_CHANGE_DONE, Bodies.frameRate(fps))
+            }
+            Msg.REQUEST_THEME -> cmd(Msg.RESPONSE_THEME, Bodies.themeAuto())
             Msg.VIDEO_ENCODER_JPEG -> cmd(Msg.VIDEO_ENCODER_JPEG_ACK)
             else -> Unit
         }
@@ -332,11 +376,13 @@ class CarLifeLink(
     private fun startVideo() {
         started = true
         initDone = true
-        streaming = true
+        // Gate first, then ask for a key frame, only then let frames through.
+        needSps = true
         dropUntilKey = false
+        events.onVideoWanted()
+        streaming = true
         Diag.carStage = Diag.CarStage.STREAMING
         events.onCarState("Магнитола показывает экран")
-        events.onVideoWanted()
     }
 
     private fun onTouchPacket(p: Packet) {

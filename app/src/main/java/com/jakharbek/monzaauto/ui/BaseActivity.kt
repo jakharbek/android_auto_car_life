@@ -109,6 +109,10 @@ abstract class BaseActivity : Activity() {
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        // A running service re-enters the foreground with the microphone type while this screen is in front.
+        if (grantResults.any { it == PackageManager.PERMISSION_GRANTED }) {
+            LinkService.command(this, LinkService.ACTION_PERMISSIONS_CHANGED)
+        }
         refresh()
     }
 

@@ -165,6 +165,9 @@ object Bodies {
 
     fun frameRate(fps: Int) = PbOut().int(1, fps).toBytes()
 
+    /** RESPONSE_THEME: themeModes 2 = follows the system (0 light, 1 dark). */
+    fun themeAuto() = PbOut().int(1, 2).toBytes()
+
     /** MEDIA_INIT / TTS_INIT: sample rate, channel count, bits per sample. */
     fun audioInit(rate: Int, channels: Int, bits: Int) = PbOut().int(1, rate).int(2, channels).int(3, bits).toBytes()
 

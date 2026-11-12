@@ -34,7 +34,7 @@ interface AaEvents {
     fun onMicRequest(open: Boolean)
 
     /** [refused]: nothing listens on the port (server not started), safe to try again later. */
-    fun onAaClosed(reason: String, refused: Boolean)
+    fun onAaClosed(link: AapLink, reason: String, refused: Boolean)
 }
 
 /**
@@ -51,7 +51,8 @@ class AapLink(
     private val port: Int = 5277,
 ) {
     private val closed = AtomicBoolean(false)
-    private lateinit var socket: Socket
+    /** Created before connecting, so [close] can abort a connect in progress. */
+    private val socket = Socket()
     private lateinit var input: DataInputStream
     private lateinit var output: OutputStream
     private lateinit var engine: SSLEngine
@@ -67,7 +68,7 @@ class AapLink(
     private val seenTypes = HashSet<Long>()
 
     @Volatile private var micSession = 0
-    @Volatile private var micUnacked = 0
+    private val micUnacked = java.util.concurrent.atomic.AtomicInteger(0)
     @Volatile private var micMaxUnacked = 4
 
     @Volatile var connected = false
@@ -83,14 +84,15 @@ class AapLink(
             Diag.aaUsbAudio = config.usbAudio
             Diag.aaMic = config.mic
             events.onAaState("Подключаюсь к Android Auto…")
-            socket = Socket()
             socket.tcpNoDelay = true
             socket.keepAlive = true
             socket.connect(InetSocketAddress(host, port), 5000)
+            if (closed.get()) return
             input = DataInputStream(socket.getInputStream().buffered(64 * 1024))
             output = socket.getOutputStream()
             Diag.aaStage = Diag.AaStage.HANDSHAKE
             handshake()
+            if (closed.get()) return
             connected = true
             Diag.aaStage = Diag.AaStage.CONNECTED
             events.onAaState("Android Auto подключён")
@@ -110,6 +112,11 @@ class AapLink(
                     is javax.net.ssl.SSLException -> Diag.aaTlsFailed = true
                 }
                 shutdown(reason, refused = e is java.net.ConnectException)
+            }
+        } finally {
+            // stopped while connecting: never leave the one-shot server's only connection hanging
+            if (closed.get()) {
+                try { socket.close() } catch (_: Exception) {}
             }
         }
     }
@@ -369,9 +376,13 @@ class AapLink(
                     events.onVideoConfig(msg.copyOfRange(2, msg.size))
                     ack()
                 } else {
-                    val withTs = msg.size >= 10 && !startsWithStartCode(msg, 2)
-                    val off = if (withTs) 10 else 2
-                    val pts = if (withTs) ByteBuffer.wrap(msg, 2, 8).long else SystemClock.elapsedRealtimeNanos() / 1000
+                    // DATA is always [type][timestamp u64][H.264]; the timestamp itself is not needed (the decoder uses a local clock)
+                    if (msg.size < 10) {
+                        ack()
+                        return
+                    }
+                    val off = 10
+                    val pts = ByteBuffer.wrap(msg, 2, 8).long
                     Diag.aaFramesReceived++
                     val once = AtomicBoolean(false)
                     events.onVideoFrame(msg.copyOfRange(off, msg.size), pts) { if (once.compareAndSet(false, true)) ack() }
@@ -415,6 +426,7 @@ class AapLink(
             T.MEDIA_SETUP -> {
                 Log.i("AA: audio setup ${Ch.name(ch)}")
                 mediaSetup(ch, 16)
+                if (ch != Ch.SYSTEM) send(Ch.CONTROL, T.AUDIO_FOCUS_NOTIFICATION, AaMessages.audioFocusGained())
             }
             T.MEDIA_START -> {
                 sessions[ch] = PbIn.parse(msg, 2).int(1)
@@ -458,7 +470,7 @@ class AapLink(
                 Log.i("AA: microphone ${if (open) "open" else "close"}")
                 if (open) {
                     micSession++
-                    micUnacked = 0
+                    micUnacked.set(0)
                     micMaxUnacked = b.int(4, 4).coerceIn(1, 32)
                 }
                 send(Ch.MIC, T.MIC_RESPONSE, AaMessages.micResponse(true, micSession), controlType = false)
@@ -466,7 +478,7 @@ class AapLink(
             }
             T.MEDIA_ACK -> {
                 val n = b.longs(3).size.takeIf { it > 0 } ?: b.int(2, 1)
-                micUnacked = (micUnacked - n).coerceAtLeast(0)
+                micUnacked.updateAndGet { (it - n).coerceAtLeast(0) }
             }
             else -> logOnce(Ch.MIC, type, b.toString())
         }
@@ -491,15 +503,23 @@ class AapLink(
     /** PCM16 mono 16 kHz from the phone microphone. Dropped when Android Auto is behind. */
     fun sendMic(pcm: ByteArray, timestampUs: Long) {
         if (!connected) return
-        if (micUnacked >= micMaxUnacked) return
-        micUnacked++
+        if (micUnacked.incrementAndGet() > micMaxUnacked) {
+            micUnacked.decrementAndGet()
+            return
+        }
         val payload = ByteBuffer.allocate(8 + pcm.size).putLong(timestampUs).put(pcm).array()
         send(Ch.MIC, T.MEDIA_DATA, payload, controlType = false)
     }
 
-    private fun startsWithStartCode(b: ByteArray, off: Int): Boolean =
-        b.size >= off + 4 && b[off].toInt() == 0 && b[off + 1].toInt() == 0 &&
-            (b[off + 2].toInt() == 1 || (b[off + 2].toInt() == 0 && b[off + 3].toInt() == 1))
+    /**
+     * Asks Android Auto for a fresh key frame by repeating the video focus notification
+     * (used after the local decoder had to be restarted).
+     */
+    fun requestKeyFrame() {
+        if (!connected) return
+        Log.i("AA: asking for a key frame")
+        send(Ch.VIDEO, T.VIDEO_FOCUS_NOTIFICATION, AaMessages.videoFocus(projected = true, unsolicited = true), controlType = false)
+    }
 
     // ---------- shutdown ----------
 
@@ -526,6 +546,6 @@ class AapLink(
             socket.close()
         } catch (_: Exception) {
         }
-        events.onAaClosed(reason, refused)
+        events.onAaClosed(this, reason, refused)
     }
 }

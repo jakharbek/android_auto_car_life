@@ -23,7 +23,8 @@ class CarLifeLinkTest {
         override fun onTouch(t: Touch) { events += "touch ${t.action} ${t.fingers}" }
         override fun onKey(androidKeyCode: Int) { events += "key $androidKeyCode" }
         override fun onFeatures(features: Map<String, Int>) { events += "features $features" }
-        override fun onCarClosed(reason: String) { events += "closed" }
+        override fun onFrameRate(fps: Int) { events += "fps $fps" }
+        override fun onCarClosed(link: CarLifeLink, reason: String) { events += "closed" }
     }
 
     @Test
@@ -80,11 +81,15 @@ class CarLifeLinkTest {
         assertEquals(1280, PbIn.parse(done.data).int(1))
         assertEquals(30, PbIn.parse(done.data).int(3))
         assertEquals(Msg.FOREGROUND, next().type)
+        assertEquals("fps 30", rec.events.poll(3, TimeUnit.SECONDS))
 
         hu(Chan.CMD, Msg.VIDEO_ENCODER_START)
         assertEquals("video", rec.events.poll(3, TimeUnit.SECONDS))
         assertTrue(link.streaming)
 
+        // until a frame with SPS arrives nothing goes out
+        link.sendVideo(byteArrayOf(0, 0, 0, 1, 0x41, 0x01), false)
+        link.sendVideo(byteArrayOf(0, 0, 0, 1, 0x65, 0x01), true)
         link.sendVideo(byteArrayOf(0, 0, 0, 1, 0x67, 0x42), true)
         val v = next()
         assertEquals(Chan.VIDEO, v.chan)

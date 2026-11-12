@@ -190,6 +190,9 @@ object AaMessages {
         return PbOut().int(1, state).bool(2, false).toBytes()
     }
 
+    /** Unsolicited "you have audio focus", sent after an audio channel is set up. */
+    fun audioFocusGained(): ByteArray = PbOut().int(1, 1).bool(2, true).toBytes()
+
     fun mediaConfig(maxUnacked: Int): ByteArray = PbOut().int(1, 2).int(2, maxUnacked).int(3, 0).toBytes()
 
     fun videoFocus(projected: Boolean, unsolicited: Boolean): ByteArray =

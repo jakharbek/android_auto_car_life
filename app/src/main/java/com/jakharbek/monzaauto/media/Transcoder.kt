@@ -9,6 +9,7 @@ import android.os.HandlerThread
 import android.view.Surface
 import com.jakharbek.monzaauto.Log
 import java.util.ArrayDeque
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Re-encodes the Android Auto picture for the head unit.
@@ -24,6 +25,8 @@ class Transcoder(
     private val fps: Int,
     /** Encoded access unit (Annex-B) and whether it is a key frame; SPS/PPS are prepended when [wantKeyFrame] was called. */
     private val output: (ByteArray, Boolean) -> Unit,
+    /** The decoder had to be restarted: it needs a key frame from Android Auto. */
+    private val needSourceKeyFrame: () -> Unit = {},
 ) {
     private val thread = HandlerThread("video-codec").apply { start() }
     private val handler = Handler(thread.looper)
@@ -39,8 +42,23 @@ class Transcoder(
     private val freeInputs = ArrayDeque<Int>()
 
     @Volatile private var csd: ByteArray? = null
-    @Volatile private var needCsd = true
+
+    /** Pending key frame requests; a request arriving while a frame is being handled is never lost. */
+    private val keyRequests = AtomicInteger(1)
     @Volatile private var released = false
+
+    /** Frames rendered into the encoder at most this often (head unit asked for a lower rate). */
+    @Volatile private var minRenderIntervalNs = 0L
+    private var lastRenderNs = 0L
+
+    /** Decoder input timestamps: local and strictly increasing, whatever clock Android Auto uses. */
+    private var lastPtsUs = 0L
+
+    /** Parameter sets from Android Auto, kept to restart the decoder. */
+    private var sourceConfig: ByteArray? = null
+
+    /** After a decoder restart, Android Auto frames are skipped until its next key frame. */
+    private var waitSourceKey = false
 
     private var decoded = 0L
     private var encoded = 0L
@@ -106,20 +124,28 @@ class Transcoder(
 
     private fun onEncoded(frame: ByteArray, key: Boolean) {
         encoded++
-        if (needCsd) {
+        val requests = keyRequests.get()
+        if (requests > 0) {
             if (!key) return // the head unit must start with SPS + PPS + IDR
             val c = csd
             val data = if (c != null && !H264.startsWithSps(frame)) c + frame else H264.fixSps(frame, width, height)
-            needCsd = false
+            // only clear the requests this frame answered; newer ones get the next key frame
+            keyRequests.addAndGet(-requests)
             output(data, true)
             return
         }
         output(frame, key)
     }
 
+    /** Head unit wants at most [fps] frames per second. */
+    fun setMaxFps(fps: Int) {
+        minRenderIntervalNs = if (fps in 1 until this.fps) 1_000_000_000L / fps else 0L
+        Log.i("VIDEO: frame rate limit ${if (minRenderIntervalNs == 0L) "off" else "$fps fps"}")
+    }
+
     /** Next frame for the head unit must be a key frame with SPS/PPS. */
     fun wantKeyFrame() {
-        needCsd = true
+        keyRequests.incrementAndGet()
         try {
             encoder?.setParameters(Bundle().apply { putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0) })
         } catch (e: Exception) {
@@ -130,6 +156,7 @@ class Transcoder(
     /** H.264 parameter sets from Android Auto. Creates the decoder on first use. */
     fun feedConfig(data: ByteArray) {
         synchronized(lock) {
+            sourceConfig = data
             if (decoder == null) startDecoder()
             pending.addLast(Pending(data, 0, true) {})
             drain()
@@ -142,7 +169,17 @@ class Transcoder(
                 done()
                 return
             }
-            pending.addLast(Pending(data, ptsUs, false, done))
+            if (waitSourceKey) {
+                if (H264.NAL_IDR !in H264.nalTypes(data)) {
+                    done()
+                    return
+                }
+                waitSourceKey = false
+                Log.i("VIDEO: decoding again from a key frame")
+            }
+            val pts = maxOf(lastPtsUs + 1, android.os.SystemClock.elapsedRealtimeNanos() / 1000)
+            lastPtsUs = pts
+            pending.addLast(Pending(data, pts, false, done))
             drain()
         }
     }
@@ -165,7 +202,10 @@ class Transcoder(
 
             override fun onOutputBufferAvailable(codec: MediaCodec, index: Int, info: MediaCodec.BufferInfo) {
                 try {
-                    codec.releaseOutputBuffer(index, info.size > 0)
+                    val now = System.nanoTime()
+                    val render = info.size > 0 && (minRenderIntervalNs == 0L || now - lastRenderNs >= minRenderIntervalNs)
+                    if (render) lastRenderNs = now
+                    codec.releaseOutputBuffer(index, render)
                     decoded++
                 } catch (e: Exception) {
                     if (!released) Log.e("VIDEO: decoder output", e)
@@ -173,7 +213,8 @@ class Transcoder(
             }
 
             override fun onError(codec: MediaCodec, e: MediaCodec.CodecException) {
-                Log.e("VIDEO: decoder error", e)
+                Log.e("VIDEO: decoder error (recoverable=${e.isRecoverable}, transient=${e.isTransient})", e)
+                if (!e.isTransient) restartDecoder(codec)
             }
 
             override fun onOutputFormatChanged(codec: MediaCodec, format: MediaFormat) {
@@ -189,6 +230,31 @@ class Transcoder(
         dec.start()
         decoder = dec
         Log.i("VIDEO: decoder ${dec.name}")
+    }
+
+    /**
+     * A failed decoder stops asking for input, which would leave Android Auto's frames unacknowledged and freeze
+     * the picture: replace it, acknowledge everything waiting, and resume from Android Auto's next key frame.
+     */
+    private fun restartDecoder(failed: MediaCodec) {
+        synchronized(lock) {
+            if (released || failed !== decoder) return
+            for (p in pending) p.done()
+            pending.clear()
+            freeInputs.clear()
+            try { failed.stop() } catch (_: Exception) {}
+            try { failed.release() } catch (_: Exception) {}
+            decoder = null
+            try {
+                startDecoder()
+                sourceConfig?.let { pending.addLast(Pending(it, 0, true) {}) }
+                waitSourceKey = true
+            } catch (e: Exception) {
+                Log.e("VIDEO: decoder restart failed", e)
+            }
+        }
+        needSourceKeyFrame()
+        wantKeyFrame()
     }
 
     /** Moves pending frames into free decoder input buffers. Caller holds [lock]. */
